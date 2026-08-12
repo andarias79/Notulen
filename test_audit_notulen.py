@@ -26,7 +26,7 @@ def _buat_modul(nama, **atribut):
 
 
 _buat_modul("dotenv", load_dotenv=lambda *a, **k: None)
-_buat_modul("sounddevice", rec=lambda *a, **k: None, wait=lambda *a, **k: None)
+_buat_modul("sounddevice", rec=lambda *a, **k: None, wait=lambda *a, **k: None, RawInputStream=None)
 _buat_modul("soundfile", write=lambda *a, **k: None)
 _buat_modul("faster_whisper", WhisperModel=object)
 
