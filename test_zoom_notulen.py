@@ -1,0 +1,1074 @@
+"""Tes unit untuk zoom_notulen.py.
+
+Menjalankan:
+    python -m unittest test_zoom_notulen -v
+
+Tes TIDAK membutuhkan dependensi pihak ketiga (sounddevice, soundfile,
+faster-whisper, google-genai, python-dotenv) karena semua di-mock sebelum import.
+"""
+
+import os
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+
+# ---------------------------------------------------------------------------
+# Mock dependensi berat/opsional SEBELUM import zoom_notulen
+# ---------------------------------------------------------------------------
+def _buat_modul(nama, **atribut):
+    mod = types.ModuleType(nama)
+    for k, v in atribut.items():
+        setattr(mod, k, v)
+    sys.modules[nama] = mod
+    return mod
+
+
+_buat_modul("dotenv", load_dotenv=lambda *a, **k: None)
+_buat_modul(
+    "sounddevice",
+    rec=lambda *a, **k: None,
+    wait=lambda *a, **k: None,
+    write=lambda *a, **k: None,
+    RawInputStream=None,  # diganti via mock.patch.object di tes rekam_audio
+)
+_buat_modul("soundfile", write=lambda *a, **k: None)
+# faster-whisper di-mock: WhisperModel dipatch per-tes dengan mock.patch.object
+_buat_modul("faster_whisper", WhisperModel=object)
+
+class _Config:
+    """Pengganti types.GenerateContentConfig yang menerima kwargs."""
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+genai_mod = _buat_modul("google.genai", Client=lambda *a, **k: None)
+_buat_modul("google.genai.types", GenerateContentConfig=_Config)
+_buat_modul("google", genai=genai_mod, __path__=[])
+
+# API key palsu agar import zoom_notulen berhasil
+os.environ["GEMINI_API_KEY"] = "kunci-pengujian"
+
+import zoom_notulen  # noqa: E402
+
+
+class TestBuatNotulen(unittest.TestCase):
+    """Tes buat_notulen dengan klien Gemini di-mock."""
+
+    def _klien_palsu(self, teks="# Notulen Rapat"):
+        """Membuat klien Gemini palsu yang mengembalikan teks tertentu."""
+        client = mock.MagicMock()
+        client.models.generate_content.return_value.text = teks
+        return client
+
+    def _panggil(self, client, *args, **kwargs):
+        """Memanggil buat_notulen dengan Client di-patch."""
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client):
+            return zoom_notulen.buat_notulen(*args, **kwargs)
+
+    def test_judul_masuk_ke_prompt(self):
+        client = self._klien_palsu()
+        hasil = self._panggil(client, "transkrip rapat", judul="Rapat Mingguan")
+        self.assertEqual(hasil, "# Notulen Rapat")
+        prompt = client.models.generate_content.call_args.kwargs["contents"]
+        self.assertIn('"# Notulen Rapat - Rapat Mingguan"', prompt)
+        self.assertIn("Rapat Mingguan", prompt)
+
+    def test_daftar_peserta_masuk_ke_prompt(self):
+        client = self._klien_palsu()
+        self._panggil(client, "transkrip", daftar_peserta="Budi, Siti")
+        prompt = client.models.generate_content.call_args.kwargs["contents"]
+        self.assertIn("Daftar Peserta", prompt)
+        self.assertIn("Budi, Siti", prompt)
+
+    def test_prompt_tanpa_judul_dan_peserta(self):
+        client = self._klien_palsu()
+        self._panggil(client, "transkrip")
+        prompt = client.models.generate_content.call_args.kwargs["contents"]
+        self.assertIn("judul/topik rapat", prompt)  # instruksi default tetap ada
+        self.assertNotIn("Daftar Peserta", prompt)
+
+    def test_model_dan_system_instruction_diteruskan(self):
+        client = self._klien_palsu()
+        self._panggil(client, "transkrip", model="gemini-eksperimen")
+        call = client.models.generate_content.call_args
+        self.assertEqual(call.kwargs["model"], "gemini-eksperimen")
+        self.assertIn(
+            "sekretaris profesional",
+            call.kwargs["config"].system_instruction,
+        )
+
+    def test_prompt_larang_halusinasi_nama_di_action_items(self):
+        """Prompt wajib memuat aturan anti-halusinasi: nama hanya jika ada di transkrip."""
+        client = self._klien_palsu()
+        self._panggil(client, "transkrip", daftar_peserta="Budi, Siti")
+        prompt = client.models.generate_content.call_args.kwargs["contents"]
+        # Aturan anti-halusinasi eksplisit
+        self.assertIn("ANTI-HALUSINASI", prompt)
+        self.assertIn("JANGAN PERNAH menciptakan nama pembicara", prompt)
+        self.assertIn("Pembicara N", prompt)
+        # Daftar Peserta hanya referensi, bukan sumber nama pembicara
+        self.assertIn("JANGAN berasumsi siapa berbicara dari daftar ini", prompt)
+        self.assertNotIn("Gunakan nama dari Daftar Peserta saat menulis Action Items", prompt)
+
+    def test_prompt_minta_angka_kunci_dipertahankan(self):
+        """Prompt meminta Poin-Poin Utama mempertahankan angka target vs realisasi."""
+        client = self._klien_palsu()
+        self._panggil(client, "transkrip")
+        prompt = client.models.generate_content.call_args.kwargs["contents"]
+        self.assertIn("PERTAHANKAN angka-angka kunci", prompt)
+        self.assertIn("target vs realisasi", prompt)
+
+    def test_system_instruction_anti_halusinasi(self):
+        """system_instruction juga memuat aturan anti-halusinasi (penguatan)."""
+        client = self._klien_palsu()
+        self._panggil(client, "transkrip")
+        system = client.models.generate_content.call_args.kwargs["config"].system_instruction
+        self.assertIn("JANGAN PERNAH menciptakan nama pembicara", system)
+        self.assertIn("Pembicara N", system)
+
+    def test_respon_kosong_memicu_systemexit(self):
+        client = self._klien_palsu(teks="   ")
+        with self.assertRaises(SystemExit):
+            self._panggil(client, "transkrip")
+
+    def test_error_api_memicu_systemexit(self):
+        client = self._klien_palsu()
+        client.models.generate_content.side_effect = Exception("API down")
+        with self.assertRaises(SystemExit):
+            self._panggil(client, "transkrip")
+
+    def test_retry_otomatis_saat_503(self):
+        client = mock.MagicMock()
+        err = Exception("503 UNAVAILABLE. Model sedang sibuk")
+        err.code = 503
+        client.models.generate_content.side_effect = [
+            err, err, mock.MagicMock(text="# Hasil"),
+        ]
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client), mock.patch(
+            "zoom_notulen.time.sleep"
+        ):
+            hasil = zoom_notulen.buat_notulen("transkrip")
+        self.assertEqual(hasil, "# Hasil")
+        self.assertEqual(client.models.generate_content.call_count, 3)
+
+    def test_error_non_transien_langsung_gagal_tanpa_retry(self):
+        client = self._klien_palsu()
+        err = Exception("400 invalid argument")
+        err.code = 400
+        client.models.generate_content.side_effect = err
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client), mock.patch(
+            "zoom_notulen.time.sleep"
+        ) as sleep:
+            with self.assertRaises(SystemExit):
+                self._panggil(client, "transkrip")
+        sleep.assert_not_called()
+        self.assertEqual(client.models.generate_content.call_count, 1)
+
+    def test_fallback_ke_model_cadangan_saat_kuota_habis(self):
+        """429 yang tak kunjung hilang setelah retry -> beralih ke model cadangan."""
+        client = mock.MagicMock()
+        err = Exception("429 RESOURCE_EXHAUSTED. Quota exceeded")
+        err.code = 429
+        resp = mock.MagicMock(text="# Hasil dari cadangan")
+        # 4x gagal (retry habis) pada model utama, lalu sukses di model cadangan
+        client.models.generate_content.side_effect = [err] * 4 + [resp]
+        with mock.patch("zoom_notulen.time.sleep"):
+            hasil = zoom_notulen._panggil_generate_dengan_retry(
+                client, "model-utama", "konten", model_cadangan=["model-cadangan"]
+            )
+        self.assertEqual(hasil, resp)
+        model_dipanggil = [
+            c.kwargs["model"] for c in client.models.generate_content.call_args_list
+        ]
+        self.assertEqual(
+            model_dipanggil, ["model-utama"] * 4 + ["model-cadangan"]
+        )
+
+    def test_semua_model_gagal_memicu_systemexit(self):
+        """Jika model utama DAN cadangan semua gagal -> SystemExit."""
+        client = mock.MagicMock()
+        err = Exception("503 UNAVAILABLE")
+        err.code = 503
+        client.models.generate_content.side_effect = [err] * 8  # 4 utama + 4 cadangan
+        with mock.patch("zoom_notulen.time.sleep"), self.assertRaises(SystemExit):
+            zoom_notulen._panggil_generate_dengan_retry(
+                client, "model-utama", "konten", model_cadangan=["model-cadangan"]
+            )
+        self.assertEqual(client.models.generate_content.call_count, 8)
+
+    def test_transkripsi_gemini_meneruskan_model_cadangan(self):
+        """transkripsi_audio_gemini memakai GEMINI_TRANSKRIPSI_CADANGAN saat memanggil."""
+        with mock.patch.object(
+            zoom_notulen,
+            "_panggil_generate_dengan_retry",
+            return_value=mock.MagicMock(text="[00:00] Pembicara 1: Halo"),
+        ) as panggil:
+            client = mock.MagicMock()
+            berkas = mock.MagicMock()
+            berkas.name = "files/audio-1"
+            keadaan = mock.MagicMock()
+            keadaan.name = "ACTIVE"
+            berkas.state = keadaan
+            client.files.upload.return_value = berkas
+            client.files.get.return_value = berkas
+            with mock.patch.object(zoom_notulen.genai, "Client", return_value=client), mock.patch.object(
+                zoom_notulen, "_durasi_audio", return_value=30.0
+            ), mock.patch.object(zoom_notulen.os.path, "getsize", return_value=5 * 1024 * 1024):
+                zoom_notulen.transkripsi_audio_gemini("audio.wav", "id")
+        call = panggil.call_args
+        self.assertEqual(call.args[1], zoom_notulen.GEMINI_TRANSKRIPSI_MODEL)
+        self.assertEqual(call.kwargs["model_cadangan"], zoom_notulen.GEMINI_TRANSKRIPSI_CADANGAN)
+
+
+class TestPeriksaHalusinasiNotulen(unittest.TestCase):
+    """Tes validasi anti-halusinasi: nama PIC Action Items harus ada di transkrip."""
+
+    def test_nama_di_action_items_tidak_ada_di_transkrip_terdeteksi(self):
+        """Kasus nyata: notulen menulis 'Budi' padahal transkrip hanya 'Pembicara N'."""
+        notulen = (
+            "# Notulen Rapat\n"
+            "## Action Items / Tindak Lanjut\n"
+            "| No | PIC | Tindak Lanjut |\n"
+            "|----|-----|---------------|\n"
+            "| 1 | Budi | Menindaklanjuti sanksi. |\n"
+            "| 2 | Siti | Memproses draf kerja sama. |\n"
+        )
+        transkrip = "[00:00] Pembicara 1: Silakan.\n[01:00] Pembicara 2: Terima kasih."
+        hasil = zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip)
+        self.assertEqual(sorted(hasil), ["Budi", "Siti"])
+
+    def test_nama_yang_muncul_di_transkrip_tidak_dilaporkan(self):
+        """Nama asli yang benar-benar muncul di transkrip dianggap aman."""
+        notulen = (
+            "## Action Items / Tindak Lanjut\n"
+            "- Budi: menindaklanjuti rekomendasi sanksi\n"
+        )
+        transkrip = "[00:05] Pembicara 1: Budi akan menindaklanjuti."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), [])
+
+    def test_label_pembicara_n_dianggap_aman(self):
+        """PIC berupa 'Pembicara N' (sesuai aturan prompt) tidak dilaporkan."""
+        notulen = (
+            "## Action Items / Tindak Lanjut\n"
+            "| PIC | Tindak Lanjut |\n"
+            "|-----|---------------|\n"
+            "| Pembicara 2 | Memproses draf. |\n"
+        )
+        transkrip = "[01:00] Pembicara 2: Terima kasih."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), [])
+
+    def test_tanpa_bagian_action_items_mengembalikan_kosong(self):
+        notulen = "# Notulen Rapat\n## Ringkasan\nSemua berjalan baik."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, "transkrip apa pun"), [])
+
+    def test_nama_tidak_lolos_batas_kata(self):
+        """Pencocokan harus kata utuh: 'Andi' tidak cocok dengan 'Andika'."""
+        notulen = "## Action Items\n- Andi: siapkan laporan"
+        transkrip = "[00:00] Pembicara 1: Andika yang mengerjakan."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), ["Andi"])
+
+    def test_section_berakhir_di_heading_berikutnya(self):
+        """Nama di luar bagian Action Items tidak ikut diperiksa."""
+        notulen = (
+            "# Notulen\n"
+            "## Action Items\n"
+            "- Budi: cek dokumen\n"
+            "## Lampiran\n"
+            "Dibuat oleh Siti"
+        )
+        transkrip = "[00:00] Pembicara 1: Halo."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), ["Budi"])
+
+    def test_bullet_dengan_en_dash_diekstrak(self):
+        notulen = "## Tindak Lanjut\n- Andi \u2013 menyiapkan anggaran"
+        transkrip = "[00:00] Pembicara 1: Halo."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), ["Andi"])
+
+    def test_bullet_frasa_tugas_tanpa_nama_tidak_dilaporkan(self):
+        """'Menyiapkan laporan - disetujui' bukan 'Nama - tugas' -> tidak jadi nama PIC."""
+        notulen = "## Tindak Lanjut\n- Menyiapkan laporan - disetujui rapat"
+        transkrip = "[00:00] Pembicara 1: Halo."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), [])
+
+    def test_pic_duplikat_hanya_dilaporkan_sekali(self):
+        """PIC sama di beberapa baris -> nama muncul sekali di daftar mencurigakan."""
+        notulen = (
+            "## Action Items / Tindak Lanjut\n"
+            "| No | PIC | Tindak Lanjut |\n"
+            "|----|-----|---------------|\n"
+            "| 1 | Budi | Tugas A |\n"
+            "| 2 | Budi | Tugas B |\n"
+            "| 3 | Siti | Tugas C |\n"
+        )
+        transkrip = "[00:00] Pembicara 1: Halo."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), ["Budi", "Siti"])
+
+    def test_nama_tim_tidak_dilaporkan(self):
+        """PIC berupa nama tim ('Tim Keuangan / Pemasaran') bukan halusinasi nama orang."""
+        notulen = (
+            "## Action Items / Tindak Lanjut\n"
+            "| Tugas | Penanggung Jawab | Tenggat Waktu |\n"
+            "| :--- | :--- | :--- |\n"
+            "| Memproses anggaran | Tim Keuangan / Pemasaran | Segera |\n"
+            "| Persiapan rilis | Tim Produk / Pengembangan | Oktober |\n"
+        )
+        transkrip = "[00:00] Pembicara 1: Halo."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), [])
+
+    def test_header_pic_siapa_dikenali(self):
+        """Header 'PIC / Siapa' (format 3 kolom) -> kolom PIC benar di index 0."""
+        notulen = (
+            "## Action Items / Tindak Lanjut\n"
+            "| PIC / Siapa | Tindak Lanjut / Apa yang Dilakukan | Status / Catatan |\n"
+            "| :--- | :--- | :--- |\n"
+            "| Tim Terkait | Melanjutkan ke tahap berikutnya | Menunggu instruksi |\n"
+        )
+        transkrip = "[00:00] Pembicara 1: Halo."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), [])
+
+    def test_header_nama_dikenali_untuk_tabel_2_kolom(self):
+        """Header 'Nama' (tabel 2 kolom) -> kolom PIC index 0 -> Budi terdeteksi."""
+        notulen = (
+            "## Action Items / Tindak Lanjut\n"
+            "| Nama | Tugas / Tindak Lanjut |\n"
+            "| :--- | :--- |\n"
+            "| Budi | Menyiapkan bahan materi. |\n"
+            "| Siti | Mengoordinasikan alur kerja. |\n"
+        )
+        transkrip = "[00:00] Pembicara 1: Halo."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), ["Budi", "Siti"])
+
+    def test_pic_placeholder_strip_tidak_dilaporkan(self):
+        """Sel PIC berisi '-' (tanpa penanggung jawab) bukan nama -> tidak di-flag."""
+        notulen = (
+            "## Action Items\n"
+            "| No | PIC | Tindak Lanjut |\n"
+            "|----|-----|---------------|\n"
+            "| 1 | - | Tugas A |\n"
+            "| 2 | - | Tugas B |\n"
+        )
+        transkrip = "[00:00] Pembicara 1: Halo."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), [])
+
+    def test_peran_generik_peserta_tidak_dilaporkan(self):
+        """PIC berupa peran generik ('Peserta') bukan nama orang -> tidak di-flag."""
+        notulen = (
+            "## Action Items\n"
+            "| Tindakan | Penanggung Jawab |\n"
+            "| :--- | :--- |\n"
+            "| Mengonfirmasi email | Peserta |\n"
+        )
+        transkrip = "[00:00] Pembicara 1: Silakan."
+        self.assertEqual(zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip), [])
+
+
+class TestDeteksiSenyap(unittest.TestCase):
+    """Tes ukur_rms dan ambang deteksi rekaman sunyi."""
+
+    @staticmethod
+    def _buat_wav(path, frekuensi=0, amplitudo=0.0, durasi=1.0, rate=16000):
+        import wave as wavemod
+
+        n = int(rate * durasi)
+        if frekuensi:
+            t = np.arange(n) / rate
+            sig = (amplitudo * np.sin(2 * np.pi * frekuensi * t) * 32767).astype(np.int16)
+        else:
+            sig = np.zeros(n, dtype=np.int16)
+        with wavemod.open(path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(rate)
+            wf.writeframes(sig.tobytes())
+        return path
+
+    def test_rekaman_sunyi_terdeteksi(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._buat_wav(os.path.join(d, "sunyi.wav"))
+            rms = zoom_notulen.ukur_rms(p)
+            self.assertIsNotNone(rms)
+            self.assertLess(rms, zoom_notulen.AMBANG_RMS_SENYAP)
+
+    def test_rekaman_bersuara_tidak_dianggap_sunyi(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._buat_wav(os.path.join(d, "nyaring.wav"), frekuensi=440, amplitudo=0.5)
+            rms = zoom_notulen.ukur_rms(p)
+            self.assertIsNotNone(rms)
+            self.assertGreater(rms, zoom_notulen.AMBANG_RMS_SENYAP)
+            self.assertAlmostEqual(rms, 0.5 / np.sqrt(2), places=2)  # RMS sinus = amp/√2
+
+    def test_file_tidak_ada_mengembalikan_none(self):
+        self.assertIsNone(zoom_notulen.ukur_rms("file_tidak_ada.wav"))
+
+
+class TestSimpanNotulen(unittest.TestCase):
+    """Tes fungsi simpan_notulen(teks, nama_dasar, format_file)."""
+
+    NAMA = "Notulen_Rapat_20260809_120000"
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="notulen_test_")
+        self.dasar = str(Path(self.dir) / self.NAMA)
+
+    def test_format_md_hanya_membuat_md(self):
+        zoom_notulen.simpan_notulen("# Judul", self.dasar, "md")
+        self.assertEqual(set(p.name for p in Path(self.dir).iterdir()), {self.NAMA + ".md"})
+
+    def test_format_txt_hanya_membuat_txt(self):
+        zoom_notulen.simpan_notulen("# Judul", self.dasar, "txt")
+        self.assertEqual(set(p.name for p in Path(self.dir).iterdir()), {self.NAMA + ".txt"})
+
+    def test_format_both_membuat_keduanya(self):
+        zoom_notulen.simpan_notulen("# Judul", self.dasar, "both")
+        md = Path(self.dasar + ".md")
+        txt = Path(self.dasar + ".txt")
+        self.assertTrue(md.exists())
+        self.assertTrue(txt.exists())
+        self.assertEqual(md.read_text(encoding="utf-8"), "# Judul")
+        self.assertEqual(txt.read_text(encoding="utf-8"), "# Judul")
+
+    def test_konten_utf8_tersimpan_utuh(self):
+        konten = "# Notulen Rapat\n\n## Ringkasan\nDiskusi tentang anggaran 2026."
+        zoom_notulen.simpan_notulen(konten, self.dasar, "md")
+        self.assertEqual(Path(self.dasar + ".md").read_text(encoding="utf-8"), konten)
+
+
+class TestSimpanTranskrip(unittest.TestCase):
+    """Tes fungsi simpan_transkrip(teks, nama_file)."""
+
+    def test_transkrip_tersimpan_utf8(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = str(Path(d) / "Transkrip_20260809_120000.txt")
+            zoom_notulen.simpan_transkrip("Halo semua peserta rapat", path)
+            self.assertEqual(Path(path).read_text(encoding="utf-8"), "Halo semua peserta rapat")
+
+
+class TestPisahkanEmails(unittest.TestCase):
+    """Tes pemisahan & validasi alamat email."""
+
+    def test_emails_valid(self):
+        self.assertEqual(
+            zoom_notulen.pisahkan_emails("budi@mail.com, siti@mail.com"),
+            ["budi@mail.com", "siti@mail.com"],
+        )
+
+    def test_spasi_dan_kosong_dibersihkan(self):
+        self.assertEqual(
+            zoom_notulen.pisahkan_emails(" budi@mail.com , , siti@mail.com "),
+            ["budi@mail.com", "siti@mail.com"],
+        )
+
+    def test_email_invalid_ditolak(self):
+        with self.assertRaises(SystemExit):
+            zoom_notulen.pisahkan_emails("bukan-email")
+
+
+class TestKirimEmail(unittest.TestCase):
+    """Tes kirim_email_resend dengan modul resend di-mock."""
+
+    def _resend_palsu(self):
+        resend_palsu = types.SimpleNamespace(api_key=None, Emails=types.SimpleNamespace())
+        resend_palsu.terkirim = []
+
+        def fake_send(params):
+            resend_palsu.terkirim.append(params)
+            return {"id": "id-123"}
+
+        resend_palsu.Emails.send = fake_send
+        return resend_palsu
+
+    def test_kirim_berhasil(self):
+        fake = self._resend_palsu()
+        with mock.patch.dict(sys.modules, {"resend": fake}), mock.patch.dict(
+            os.environ, {"RESEND_API_KEY": "re_xxx"}
+        ):
+            zoom_notulen.kirim_email_resend(["budi@mail.com"], "Subjek Rapat", "Isi notulen")
+        self.assertEqual(fake.api_key, "re_xxx")
+        params = fake.terkirim[0]
+        self.assertEqual(params["to"], ["budi@mail.com"])
+        self.assertEqual(params["subject"], "Subjek Rapat")
+        self.assertEqual(params["text"], "Isi notulen")
+
+    def test_tanpa_api_key_memicu_error(self):
+        fake = self._resend_palsu()
+        with mock.patch.dict(sys.modules, {"resend": fake}), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            with self.assertRaises(SystemExit):
+                zoom_notulen.kirim_email_resend(["budi@mail.com"], "S", "I")
+
+    def test_error_api_memicu_systemexit(self):
+        fake = self._resend_palsu()
+
+        def fake_send(params):
+            raise Exception("rate limit")
+
+        fake.Emails.send = fake_send
+        with mock.patch.dict(sys.modules, {"resend": fake}), mock.patch.dict(
+            os.environ, {"RESEND_API_KEY": "re_xxx"}
+        ):
+            with self.assertRaises(SystemExit):
+                zoom_notulen.kirim_email_resend(["budi@mail.com"], "S", "I")
+
+
+class TestKonfigurasi(unittest.TestCase):
+    """Tes muat_konfigurasi dan terapkan_konfigurasi."""
+
+    @staticmethod
+    def _tulis_json(d, data):
+        import json
+
+        p = os.path.join(d, "konfigurasi.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return p
+
+    def test_file_tidak_ada_kembalikan_kosong(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(zoom_notulen.muat_konfigurasi(os.path.join(d, "kosong.json")), {})
+
+    def test_json_rusak_kembalikan_kosong(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "rusak.json")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("{bukan json")
+            self.assertEqual(zoom_notulen.muat_konfigurasi(p), {})
+
+    def test_json_valid_termuat(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._tulis_json(d, {"judul": "Rapat X", "durasi": 300})
+            cfg = zoom_notulen.muat_konfigurasi(p)
+            self.assertEqual(cfg["judul"], "Rapat X")
+            self.assertEqual(cfg["durasi"], 300)
+
+    def test_default_bawaan_tanpa_cli_dan_konfigurasi(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {})
+        self.assertEqual(cfg["durasi"], 60)
+        self.assertEqual(cfg["sumber"], "mic")
+        self.assertEqual(cfg["format"], "both")
+        self.assertEqual(cfg["bahasa"], "id")
+        self.assertEqual(cfg["engine"], "lokal")
+        self.assertEqual(cfg["model"], "gemini-flash-lite-latest")
+        self.assertIsNone(cfg["judul"])
+        self.assertIsNone(cfg["tujuan_email"])
+
+    def test_konfigurasi_mengisi_default(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        cfg = zoom_notulen.terapkan_konfigurasi(
+            args,
+            {"judul": "Rapat X", "durasi": 3600, "sumber": "loopback", "engine": "gemini", "tujuan_email": "a@b.com"},
+        )
+        self.assertEqual(cfg["judul"], "Rapat X")
+        self.assertEqual(cfg["durasi"], 3600)
+        self.assertEqual(cfg["sumber"], "loopback")
+        self.assertEqual(cfg["engine"], "gemini")
+        self.assertEqual(cfg["tujuan_email"], "a@b.com")
+
+    def test_cli_engine_menang_atas_konfigurasi(self):
+        args = zoom_notulen.buat_parser().parse_args(["--engine", "lokal"])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {"engine": "gemini"})
+        self.assertEqual(cfg["engine"], "lokal")
+
+    def test_cli_menang_atas_konfigurasi(self):
+        args = zoom_notulen.buat_parser().parse_args(["--durasi", "120", "--judul", "Dari CLI"])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {"durasi": 3600, "judul": "Dari Konfig"})
+        self.assertEqual(cfg["durasi"], 120)
+        self.assertEqual(cfg["judul"], "Dari CLI")
+
+    def test_sumber_invalid_di_konfigurasi_ditolak(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        with self.assertRaises(SystemExit):
+            zoom_notulen.terapkan_konfigurasi(args, {"sumber": "radio"})
+
+    def test_format_invalid_di_konfigurasi_ditolak(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        with self.assertRaises(SystemExit):
+            zoom_notulen.terapkan_konfigurasi(args, {"format": "docx"})
+
+    def test_engine_invalid_di_konfigurasi_ditolak(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        with self.assertRaises(SystemExit):
+            zoom_notulen.terapkan_konfigurasi(args, {"engine": "radar"})
+
+
+class TestParsingArgumen(unittest.TestCase):
+    """Tes parsing argumen CLI via buat_parser()."""
+
+    def test_nilai_default_none(self):
+        """Opsi yang bisa diisi konfigurasi bernilai None saat tidak diberikan CLI."""
+        args = zoom_notulen.buat_parser().parse_args([])
+        self.assertIsNone(args.durasi)
+        self.assertIsNone(args.sumber)
+        self.assertIsNone(args.format)
+        self.assertIsNone(args.bahasa)
+        self.assertIsNone(args.engine)
+        self.assertIsNone(args.model)
+        self.assertIsNone(args.judul)
+        self.assertIsNone(args.daftar_peserta)
+        self.assertIsNone(args.tujuan_email)
+        self.assertIsNone(args.audio)
+        self.assertIsNone(args.perangkat)
+        self.assertFalse(args.list_devices)
+        self.assertFalse(args.abaikan_senyap)
+
+    def test_opsi_lengkap(self):
+        args = zoom_notulen.buat_parser().parse_args(
+            [
+                "--durasi", "3600",
+                "--sumber", "loopback",
+                "--format", "md",
+                "--judul", "Rapat Tim Produk",
+                "--daftar-peserta", "Budi, Siti, Andi",
+                "--tujuan-email", "budi@mail.com, siti@mail.com",
+                "--bahasa", "en",
+                "--perangkat", "8",
+                "--engine", "gemini",
+                "--list-devices",
+                "--abaikan-senyap",
+            ]
+        )
+        self.assertEqual(args.durasi, 3600)
+        self.assertEqual(args.sumber, "loopback")
+        self.assertEqual(args.format, "md")
+        self.assertEqual(args.judul, "Rapat Tim Produk")
+        self.assertEqual(args.daftar_peserta, "Budi, Siti, Andi")
+        self.assertEqual(args.tujuan_email, "budi@mail.com, siti@mail.com")
+        self.assertEqual(args.bahasa, "en")
+        self.assertEqual(args.perangkat, 8)
+        self.assertEqual(args.engine, "gemini")
+        self.assertTrue(args.list_devices)
+        self.assertTrue(args.abaikan_senyap)
+
+    def test_sumber_invalid_ditolak(self):
+        with self.assertRaises(SystemExit):
+            zoom_notulen.buat_parser().parse_args(["--sumber", "radio"])
+
+    def test_engine_invalid_ditolak(self):
+        with self.assertRaises(SystemExit):
+            zoom_notulen.buat_parser().parse_args(["--engine", "radar"])
+
+    def test_format_invalid_ditolak(self):
+        with self.assertRaises(SystemExit):
+            zoom_notulen.buat_parser().parse_args(["--format", "docx"])
+
+    def test_durasi_harus_angka(self):
+        with self.assertRaises(SystemExit):
+            zoom_notulen.buat_parser().parse_args(["--durasi", "abc"])
+
+    def test_perangkat_harus_angka(self):
+        with self.assertRaises(SystemExit):
+            zoom_notulen.buat_parser().parse_args(["--perangkat", "bukan-angka"])
+
+
+class TestRekamMic(unittest.TestCase):
+    """Tes rekam_audio (mode mic): streaming bertahap ke file WAV int16."""
+
+    def test_rekam_audio_menulis_wav_int16_bertahap(self):
+        import wave as wavemod
+
+        rate = zoom_notulen.SAMPLE_RATE
+        total_frames = int(1 * rate)  # durasi 1 detik
+        frame_bytes = 2 * zoom_notulen.KANAL_REKAM  # mono x int16
+
+        class StreamPalsu:
+            """Stream yang mengembalikan chunk kecil bertahap (meniru hardware)."""
+
+            def __init__(self):
+                self.dibaca = 0
+
+            def read(self, n):
+                n = min(n, total_frames - self.dibaca)
+                if n <= 0:
+                    return b"", False
+                self.dibaca += n
+                return b"\x00" * (n * frame_bytes), False
+
+        class RawInputPalsu:
+            def __enter__(self):
+                return StreamPalsu()
+
+            def __exit__(self, *a):
+                return False
+
+        with mock.patch.object(
+            zoom_notulen.sd, "RawInputStream", return_value=RawInputPalsu()
+        ), tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "rekam.wav")
+            zoom_notulen.rekam_audio(1, path)
+            with wavemod.open(path, "rb") as wf:
+                self.assertEqual(wf.getnchannels(), zoom_notulen.KANAL_REKAM)
+                self.assertEqual(wf.getsampwidth(), 2)  # int16
+                self.assertEqual(wf.getframerate(), rate)
+                self.assertEqual(wf.getnframes(), total_frames)
+
+    def test_error_memicu_systemexit(self):
+        with mock.patch.object(
+            zoom_notulen.sd,
+            "RawInputStream",
+            side_effect=RuntimeError("no input device"),
+        ), tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit):
+                zoom_notulen.rekam_audio(1, os.path.join(d, "x.wav"))
+
+    def test_tombol_henti_menghentikan_rekaman_dan_menyimpan_file(self):
+        """Tombol 'q' di tengah rekaman -> loop berhenti, file WAV tetap tersimpan."""
+        import wave as wavemod
+        import threading
+
+        rate = zoom_notulen.SAMPLE_RATE
+        frame_bytes = 2 * zoom_notulen.KANAL_REKAM
+
+        class StreamPalsu:
+            def read(self, n):
+                return b"\x00" * (n * frame_bytes), False  # tak terbatas (durasi 10 dtk)
+
+        class RawInputPalsu:
+            def __enter__(self):
+                return StreamPalsu()
+
+            def __exit__(self, *a):
+                return False
+
+        berhenti = threading.Event()
+
+        class StreamPalsu:
+            """Menandai flag berhenti SETELAH chunk pertama (meniru tekan tombol q)."""
+
+            def __init__(self):
+                self.dibaca = 0
+
+            def read(self, n):
+                if self.dibaca == 0:
+                    # Chunk pertama ditulis dulu (biarkan satu putaran loop normal)
+                    self.dibaca = 1
+                    return b"\x00" * (n * frame_bytes), False
+                berhenti.set()  # mulai iterasi berikutnya: flag sudah aktif -> break
+                return b"\x00" * (n * frame_bytes), False
+
+        with mock.patch.object(
+            zoom_notulen, "_rekam_berhenti", return_value=berhenti
+        ), mock.patch.object(
+            zoom_notulen.sd, "RawInputStream", return_value=RawInputPalsu()
+        ), tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "rekam_stop.wav")
+            durasi = zoom_notulen.rekam_audio(10, path)
+            self.assertLess(durasi, 10)  # berhenti lebih awal
+            with wavemod.open(path, "rb") as wf:
+                self.assertGreater(wf.getnframes(), 0)  # file TIDAK kosong
+                self.assertLess(wf.getnframes(), 10 * rate)  # lebih pendek dari durasi penuh
+
+    def test_ctrl_c_menghentikan_rekaman_dan_menyimpan_file(self):
+        """KeyboardInterrupt di tengah rekaman -> file tetap tersimpan (bukan dibuang)."""
+        import wave as wavemod
+
+        rate = zoom_notulen.SAMPLE_RATE
+        frame_bytes = 2 * zoom_notulen.KANAL_REKAM
+
+        class StreamPalsu:
+            def __init__(self):
+                self.dibaca = 0
+
+            def read(self, n):
+                self.dibaca += 1
+                if self.dibaca == 2:
+                    raise KeyboardInterrupt()  # pengguna menekan Ctrl+C
+                return b"\x00" * (n * frame_bytes), False
+
+        class RawInputPalsu:
+            def __enter__(self):
+                return StreamPalsu()
+
+            def __exit__(self, *a):
+                return False
+
+        with mock.patch.object(zoom_notulen, "_rekam_berhenti", return_value=None), mock.patch.object(
+            zoom_notulen.sd, "RawInputStream", return_value=RawInputPalsu()
+        ), tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "rekam_ctrlc.wav")
+            durasi = zoom_notulen.rekam_audio(10, path)
+            self.assertLess(durasi, 10)
+            with wavemod.open(path, "rb") as wf:
+                self.assertGreater(wf.getnframes(), 0)
+
+    def test_pantau_tombol_henti_mendeteksi_q(self):
+        """Utas pemantau menandai flag saat tombol 'q' ditekan."""
+        import threading
+
+        msvcrt_palsu = types.SimpleNamespace()
+        msvcrt_palsu.kbhit = lambda: True
+        msvcrt_palsu.getch = lambda: b"q"
+        berhenti = threading.Event()
+        with mock.patch.object(zoom_notulen, "_deteksi_msvcrt", return_value=msvcrt_palsu):
+            zoom_notulen._pantau_tombol_henti(berhenti)
+        self.assertTrue(berhenti.is_set())
+
+    def test_pantau_tombol_henti_abaikan_tombol_lain(self):
+        """Tombol selain 'q' tidak menandai flag; 'q' berikutnya menandai."""
+        import threading
+
+        tombol = iter([b"x", b"a", b"q"])
+        msvcrt_palsu = types.SimpleNamespace()
+        msvcrt_palsu.kbhit = lambda: True
+        msvcrt_palsu.getch = lambda: next(tombol)
+        berhenti = threading.Event()
+        with mock.patch.object(zoom_notulen, "_deteksi_msvcrt", return_value=msvcrt_palsu):
+            zoom_notulen._pantau_tombol_henti(berhenti)
+        self.assertTrue(berhenti.is_set())
+
+    def test_pantau_tombol_henti_tanpa_msvcrt_berakhir_seketika(self):
+        """OS tanpa msvcrt: utas berakhir tanpa menandai flag (Ctrl+C masih bisa)."""
+        import threading
+
+        berhenti = threading.Event()
+        with mock.patch.object(zoom_notulen, "_deteksi_msvcrt", return_value=None):
+            zoom_notulen._pantau_tombol_henti(berhenti)
+        self.assertFalse(berhenti.is_set())
+
+
+class TestPeringatanDurasiPanjang(unittest.TestCase):
+    """Tes peringatan_durasi_panjang: info untuk rekaman > 1 jam."""
+
+    def test_tidak_ada_peringatan_untuk_durasi_pendek(self):
+        self.assertIsNone(zoom_notulen.peringatan_durasi_panjang(60))
+        self.assertIsNone(zoom_notulen.peringatan_durasi_panjang(3600))
+
+    def test_peringatan_untuk_durasi_panjang(self):
+        teks = zoom_notulen.peringatan_durasi_panjang(7200)
+        self.assertIsNotNone(teks)
+        self.assertIn("DURASI PEREKAMAN PANJANG", teks)
+        self.assertIn("7200", teks)
+        self.assertIn("2.0 jam", teks)
+        self.assertIn("MB", teks)  # perkiraan ukuran file (16 kHz mono int16)
+
+    def test_durasi_config_panjang_memicu_peringatan_di_main_path(self):
+        """Durasi 7200 dari konfigurasi.json -> peringatan bukan None."""
+        cfg = zoom_notulen.terapkan_konfigurasi(
+            zoom_notulen.buat_parser().parse_args([]), {"durasi": 7200}
+        )
+        self.assertIsNotNone(zoom_notulen.peringatan_durasi_panjang(cfg["durasi"]))
+
+
+class TestTranskripsi(unittest.TestCase):
+    """Tes transkripsi_audio (faster-whisper): bahasa eksplisit vs 'auto', timestamp."""
+
+    @staticmethod
+    def _segmen_palsu(daftar, bahasa="id"):
+        """Mengubah [(start, end, teks), ...] menjadi (generator segmen, info)."""
+        info = types.SimpleNamespace(language=bahasa, duration=10.0)
+        generator = iter(
+            types.SimpleNamespace(start=s, end=e, text=t) for s, e, t in daftar
+        )
+        return generator, info
+
+    def _panggil(self, daftar, bahasa="id"):
+        model = mock.MagicMock()
+        model.transcribe.return_value = self._segmen_palsu(daftar)
+        with mock.patch.object(zoom_notulen, "WhisperModel", return_value=model):
+            hasil = zoom_notulen.transkripsi_audio("a.wav", bahasa)
+        return hasil, model
+
+    def test_bahasa_explisit_diteruskan_ke_faster_whisper(self):
+        hasil, model = self._panggil([(0.0, 5.0, "Halo dunia")], "id")
+        self.assertEqual(hasil, "[00:00] Halo dunia")
+        model.transcribe.assert_called_once_with(
+            "a.wav",
+            language="id",
+            beam_size=zoom_notulen.WHISPER_BEAM_SIZE,
+            vad_filter=zoom_notulen.WHISPER_VAD,
+        )
+
+    def test_bahasa_auto_memanggil_tanpa_language(self):
+        """'auto' tidak boleh memaksa bahasa -> faster-whisper mendeteksi sendiri."""
+        _, model = self._panggil([(0.0, 5.0, "Hello world")], "auto")
+        self.assertIsNone(model.transcribe.call_args.kwargs["language"])
+        self.assertTrue(model.transcribe.call_args.kwargs["vad_filter"])
+
+    def test_timestamp_menit_dan_detik(self):
+        hasil, _ = self._panggil(
+            [(65.0, 70.0, "Lanjut diskusi"), (120.5, 130.0, "Selesai")], "id"
+        )
+        self.assertEqual(hasil, "[01:05] Lanjut diskusi\n[02:00] Selesai")
+
+    def test_segmen_kosong_diabaikan(self):
+        hasil, _ = self._panggil([(0.0, 5.0, "   "), (5.0, 10.0, "Terdengar")], "id")
+        self.assertEqual(hasil, "[00:05] Terdengar")
+
+    def test_semua_segmen_kosong_memicu_systemexit(self):
+        """Audio bising tanpa teks yang layak -> SystemExit, bukan string kosong."""
+        model = mock.MagicMock()
+        model.transcribe.return_value = self._segmen_palsu([(0.0, 5.0, "   "), (5.0, 10.0, "")])
+        with mock.patch.object(zoom_notulen, "WhisperModel", return_value=model):
+            with self.assertRaises(SystemExit):
+                zoom_notulen.transkripsi_audio("a.wav", "id")
+
+    def test_transkripsi_kosong_memicu_systemexit(self):
+        model = mock.MagicMock()
+        model.transcribe.return_value = (iter(()), types.SimpleNamespace(language="id"))
+        with mock.patch.object(zoom_notulen, "WhisperModel", return_value=model):
+            with self.assertRaises(SystemExit):
+                zoom_notulen.transkripsi_audio("a.wav", "id")
+
+    def test_bahasa_auto_berfungsi_lewat_parser_dan_konfigurasi(self):
+        """Nilai 'auto' bisa masuk lewat CLI atau file konfigurasi."""
+        args = zoom_notulen.buat_parser().parse_args(["--bahasa", "auto"])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {})
+        self.assertEqual(cfg["bahasa"], "auto")
+        # Dari konfigurasi juga berlaku
+        args2 = zoom_notulen.buat_parser().parse_args([])
+        cfg2 = zoom_notulen.terapkan_konfigurasi(args2, {"bahasa": "auto"})
+        self.assertEqual(cfg2["bahasa"], "auto")
+
+
+class TestTranskripsiGemini(unittest.TestCase):
+    """Tes transkripsi_audio_gemini: upload File API, polling ACTIVE, parsing timestamp."""
+
+    def _klien_palsu(self, teks=None):
+        """Klien Gemini palsu dengan files.upload/get/delete dan generate_content."""
+        if teks is None:
+            teks = "[00:00] Pembicara 1: Halo semua\n[01:30] Pembicara 2: Selamat pagi"
+        client = mock.MagicMock()
+        berkas = mock.MagicMock()
+        berkas.name = "files/audio-123"
+        keadaan = mock.MagicMock()
+        keadaan.name = "ACTIVE"
+        berkas.state = keadaan
+        client.files.upload.return_value = berkas
+        client.files.get.return_value = berkas
+        resp = mock.MagicMock()
+        resp.text = teks
+        client.models.generate_content.return_value = resp
+        return client
+
+    def _panggil(self, client, bahasa="id", nama_file="audio.wav"):
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client), mock.patch.object(
+            zoom_notulen, "_durasi_audio", return_value=60.0
+        ), mock.patch.object(zoom_notulen.os.path, "getsize", return_value=5 * 1024 * 1024):
+            return zoom_notulen.transkripsi_audio_gemini(nama_file, bahasa)
+
+    def test_unggah_dan_generate_content_dipanggil(self):
+        client = self._klien_palsu()
+        hasil = self._panggil(client)
+        self.assertIn("Pembicara 1: Halo semua", hasil)
+        client.files.upload.assert_called_once()
+        self.assertEqual(client.files.upload.call_args.kwargs["file"], "audio.wav")
+        call = client.models.generate_content.call_args
+        self.assertEqual(call.kwargs["model"], zoom_notulen.GEMINI_TRANSKRIPSI_MODEL)
+        isi = call.kwargs["contents"]
+        self.assertIn("VERBATIM", isi[1])
+        client.files.delete.assert_called_once_with(name="files/audio-123")
+
+    def test_prompt_memuat_instruksi_bahasa(self):
+        client = self._klien_palsu()
+        self._panggil(client, bahasa="id")
+        isi = client.models.generate_content.call_args.kwargs["contents"]
+        self.assertIn("Bahasa audio: 'id'", isi[1])
+
+    def test_bahasa_auto_meminta_deteksi(self):
+        client = self._klien_palsu()
+        self._panggil(client, bahasa="auto")
+        isi = client.models.generate_content.call_args.kwargs["contents"]
+        self.assertIn("Deteksi bahasa", isi[1])
+
+    def test_parsing_timestamp_dan_geser_offset(self):
+        teks = "[00:42] Pembicara 1: Halo\n[01:02:03] Pembicara 2: Selesai\nPembukaan tidak ikut"
+        baris = zoom_notulen._parsing_transkrip_gemini(teks, offset=3600)
+        self.assertEqual(baris[0], "[01:00:42] Pembicara 1: Halo")
+        self.assertEqual(baris[1], "[02:02:03] Pembicara 2: Selesai")
+        self.assertEqual(len(baris), 2)
+
+    def test_parsing_tanpa_timestamp_mengembalikan_teks_mentah(self):
+        """Fallback: jika Gemini tidak memakai format timestamp, teks mentah tetap dipakai."""
+        self.assertEqual(
+            zoom_notulen._parsing_transkrip_gemini("tidak ada timestamp", 0),
+            ["tidak ada timestamp"],
+        )
+
+    def test_parsing_membuang_blok_kode_dan_baris_kosong(self):
+        teks = "```\n[00:01] Pembicara 1: A\n[00:02] Pembicara 2: B\n```"
+        self.assertEqual(
+            zoom_notulen._parsing_transkrip_gemini(teks, 0),
+            ["[00:01] Pembicara 1: A", "[00:02] Pembicara 2: B"],
+        )
+
+    def test_respon_kosong_memicu_systemexit(self):
+        client = self._klien_palsu(teks="   ")
+        with self.assertRaises(SystemExit):
+            self._panggil(client)
+
+    def test_respon_hanya_markdown_memicu_systemexit(self):
+        """Teks hanya berisi blok kode kosong -> tidak ada konten -> SystemExit."""
+        client = self._klien_palsu(teks="```\n```")
+        with self.assertRaises(SystemExit):
+            self._panggil(client)
+
+    def test_state_failed_memicu_systemexit(self):
+        client = self._klien_palsu()
+        keadaan = mock.MagicMock()
+        keadaan.name = "FAILED"
+        client.files.get.return_value.state = keadaan
+        with self.assertRaises(SystemExit):
+            self._panggil(client)
+
+    def test_durasi_melebihi_batas_memicu_systemexit(self):
+        client = self._klien_palsu()
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client), mock.patch.object(
+            zoom_notulen, "_durasi_audio", return_value=10 * 3600
+        ):
+            with self.assertRaises(SystemExit):
+                zoom_notulen.transkripsi_audio_gemini("audio.wav", "id")
+        client.files.upload.assert_not_called()
+
+    def test_audio_panjang_dipotong_otomatis(self):
+        """Audio > 2 jam dipotong; timestamp tiap potongan digeser oleh offset."""
+        client = self._klien_palsu()
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client), mock.patch.object(
+            zoom_notulen, "_durasi_audio", return_value=3 * 3600 + 10
+        ), mock.patch.object(
+            zoom_notulen, "_potong_audio", return_value="/tmp/potongan.wav"
+        ) as potong, mock.patch.object(
+            zoom_notulen, "_transkripsi_gemini_satu", side_effect=lambda c, f, b, offset=0, konteks=None: (
+                f"[{offset // 3600:02d}:00:00] Bagian"
+            )
+        ) as satu, mock.patch.object(zoom_notulen, "_hapus_file") as hapus:
+            hasil = zoom_notulen.transkripsi_audio_gemini("audio.wav", "id")
+        self.assertEqual(potong.call_count, 2)  # 3 jam 10 dtk -> 2 potongan
+        self.assertEqual(satu.call_count, 2)
+        self.assertIn("[00:00:00] Bagian", hasil)
+        self.assertIn("[02:00:00] Bagian", hasil)
+        hapus.assert_called()
+
+    def test_wav_besar_dikompres_ke_flac(self):
+        """WAV > ambang dikompres ke FLAC sementara sebelum upload."""
+        client = self._klien_palsu()
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client), mock.patch.object(
+            zoom_notulen, "_durasi_audio", return_value=60.0
+        ), mock.patch.object(
+            zoom_notulen.os.path, "getsize", return_value=50 * 1024 * 1024
+        ), mock.patch.object(
+            zoom_notulen, "_kompres_ke_flac", return_value="/tmp/audio.flac"
+        ) as kompres:
+            zoom_notulen.transkripsi_audio_gemini("audio.wav", "id")
+        kompres.assert_called_once_with("audio.wav")
+        self.assertEqual(client.files.upload.call_args.kwargs["file"], "/tmp/audio.flac")
+
+    def test_engine_gemini_melewati_dispatcher(self):
+        """--engine gemini memilih transkripsi cloud; default memilih lokal."""
+        with mock.patch.object(zoom_notulen, "transkripsi_audio_gemini", return_value="G") as g, mock.patch.object(
+            zoom_notulen, "transkripsi_audio_lokal", return_value="L"
+        ) as l:
+            self.assertEqual(zoom_notulen.transkripsi_audio("a.wav", "id", "gemini"), "G")
+            self.assertEqual(zoom_notulen.transkripsi_audio("a.wav", "id", "lokal"), "L")
+            self.assertEqual(zoom_notulen.transkripsi_audio("a.wav", "id"), "L")
+        g.assert_called_once_with("a.wav", "id", konteks=None)
+        self.assertEqual(l.call_count, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,11 @@
+{
+  "judul": "Rapat Mingguan Tim",
+  "daftar_peserta": "Budi, Siti, Andi",
+  "tujuan_email": "budi@mail.com, siti@mail.com",
+  "durasi": 3600,
+  "sumber": "loopback",
+  "format": "both",
+  "bahasa": "id",
+  "engine": "lokal",
+  "konteks": "Kemenkes, Permenpan, P2KA, SJT, HCC, Human Care Consulting"
+}

@@ -1,0 +1,20 @@
+# Rahasia - JANGAN pernah di-commit
+.env
+
+# File audio hasil rekaman
+rekaman_zoom_*.wav
+
+# File notulen & transkrip hasil generate
+Notulen_Rapat_*.txt
+Notulen_Rapat_*.md
+Transkrip_*.txt
+Index_Notulen.md
+konfigurasi.json
+
+# Cache Python
+__pycache__/
+*.pyc
+
+Hasil_Rekaman/
+Hasil_Transkripsi/
+Hasil_Notulen/
