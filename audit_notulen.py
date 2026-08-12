@@ -70,8 +70,10 @@ def audit_semua():
                 {"file": md, "status": "TANPA-TRANSKRIP", "nama": [], "transkrip": None}
             )
             continue
-        notulen = open(md, encoding="utf-8").read()
-        transkrip = open(nama_transkrip, encoding="utf-8").read()
+        with open(md, encoding="utf-8") as f:
+            notulen = f.read()
+        with open(nama_transkrip, encoding="utf-8") as f:
+            transkrip = f.read()
         mencurigakan = zoom_notulen.periksa_halusinasi_notulen(notulen, transkrip)
         status = "HALUSINASI" if mencurigakan else "BERSIH"
         nama_file_laporan = os.path.basename(md)
