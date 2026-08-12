@@ -32,7 +32,8 @@ class TestBacaJudul(unittest.TestCase):
 
 class TestKumpulkanNotulen(unittest.TestCase):
     def _tulis(self, folder, nama, judul):
-        p = os.path.join(folder, nama)
+        os.makedirs(os.path.join(folder, "Hasil_Notulen"), exist_ok=True)
+        p = os.path.join(folder, "Hasil_Notulen", nama)
         with open(p, "w", encoding="utf-8") as f:
             f.write(f"# {judul}\n\nisi\n")
         return p
@@ -49,7 +50,8 @@ class TestKumpulkanNotulen(unittest.TestCase):
     def test_file_non_notulen_diabaikan(self):
         with tempfile.TemporaryDirectory() as d:
             self._tulis(d, "Notulen_Rapat_20260809_100000.md", "Rapat A")
-            with open(os.path.join(d, "catatan_biasa.md"), "w", encoding="utf-8") as f:
+            os.makedirs(os.path.join(d, "Hasil_Notulen"), exist_ok=True)
+            with open(os.path.join(d, "Hasil_Notulen", "catatan_biasa.md"), "w", encoding="utf-8") as f:
                 f.write("# Bukan notulen\n")
             entri = index_notulen.kumpulkan_notulen(d)
             self.assertEqual(len(entri), 1)
@@ -71,7 +73,8 @@ class TestKumpulkanNotulen(unittest.TestCase):
 
     def test_nama_tidak_valid_diabaikan(self):
         with tempfile.TemporaryDirectory() as d:
-            with open(os.path.join(d, "Notulen_Rapat_salah.md"), "w", encoding="utf-8") as f:
+            os.makedirs(os.path.join(d, "Hasil_Notulen"), exist_ok=True)
+            with open(os.path.join(d, "Hasil_Notulen", "Notulen_Rapat_salah.md"), "w", encoding="utf-8") as f:
                 f.write("# X\n")
             self.assertEqual(index_notulen.kumpulkan_notulen(d), [])
 

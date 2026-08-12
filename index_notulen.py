@@ -44,7 +44,7 @@ def kumpulkan_notulen(folder=FOLDER):
         except ValueError:
             continue
         # Prioritas file .md; jika keduanya ada, jangan duplikasi
-        if nama.endswith(".txt") and os.path.exists(os.path.join(folder, nama[:-4] + ".md")):
+        if nama.endswith(".txt") and os.path.exists(os.path.join(folder, "Hasil_Notulen", nama[:-4] + ".md")):
             continue
         entri.append({
             "waktu": waktu,

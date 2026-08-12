@@ -66,21 +66,24 @@ class TestTranskripUntuk(unittest.TestCase):
         os.chdir(self.cwd_sebelum)
 
     def _tulis(self, nama, isi=""):
-        with open(os.path.join(self.dir, nama), "w", encoding="utf-8") as f:
+        subfolder = "Hasil_Transkripsi" if nama.startswith("Transkrip") else "Hasil_Notulen"
+        p = os.path.join(self.dir, subfolder)
+        os.makedirs(p, exist_ok=True)
+        with open(os.path.join(p, nama), "w", encoding="utf-8") as f:
             f.write(isi)
         return nama
 
     def test_stempel_sama_dipakai(self):
         self._tulis("Transkrip_20260811_123456.txt")
         self.assertEqual(
-            audit_notulen.transkrip_untuk("20260811_123456"), "Transkrip_20260811_123456.txt"
+            audit_notulen.transkrip_untuk("20260811_123456"), os.path.join("Hasil_Transkripsi", "Transkrip_20260811_123456.txt")
         )
 
     def test_peta_manual_untuk_notulen_regenerasi(self):
         """Notulen baru (174600) memakai transkrip lama (121046) via PEMETAAN_TRANSKRIP."""
         self._tulis("Transkrip_20260810_121046.txt")
         self.assertEqual(
-            audit_notulen.transkrip_untuk("20260811_174600"), "Transkrip_20260810_121046.txt"
+            audit_notulen.transkrip_untuk("20260811_174600"), os.path.join("Hasil_Transkripsi", "Transkrip_20260810_121046.txt")
         )
 
     def test_transkrip_tidak_ada_mengembalikan_none(self):
@@ -97,7 +100,10 @@ class TestAuditSemua(unittest.TestCase):
         os.chdir(self.cwd_sebelum)
 
     def _tulis(self, nama, isi=""):
-        with open(os.path.join(self.dir, nama), "w", encoding="utf-8") as f:
+        subfolder = "Hasil_Transkripsi" if nama.startswith("Transkrip") else "Hasil_Notulen"
+        p = os.path.join(self.dir, subfolder)
+        os.makedirs(p, exist_ok=True)
+        with open(os.path.join(p, nama), "w", encoding="utf-8") as f:
             f.write(isi)
         return nama
 
