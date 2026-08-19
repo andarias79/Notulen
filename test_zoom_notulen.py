@@ -10,6 +10,7 @@ faster-whisper, google-genai, python-dotenv) karena semua di-mock sebelum import
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -911,7 +912,7 @@ class TestRekamMic(unittest.TestCase):
                 return b"\x00" * (n * frame_bytes), False
 
         with mock.patch.object(
-            zoom_notulen, "_rekam_berhenti", return_value=berhenti
+            zoom_notulen, "_rekam_berhenti_dengan_pause", return_value=(berhenti, threading.Event())
         ), mock.patch.object(
             zoom_notulen.sd, "RawInputStream", return_value=RawInputPalsu()
         ), tempfile.TemporaryDirectory() as d:
@@ -946,7 +947,7 @@ class TestRekamMic(unittest.TestCase):
             def __exit__(self, *a):
                 return False
 
-        with mock.patch.object(zoom_notulen, "_rekam_berhenti", return_value=None), mock.patch.object(
+        with mock.patch.object(zoom_notulen, "_rekam_berhenti_dengan_pause", return_value=(None, threading.Event())), mock.patch.object(
             zoom_notulen.sd, "RawInputStream", return_value=RawInputPalsu()
         ), tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "rekam_ctrlc.wav")

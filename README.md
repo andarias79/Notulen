@@ -26,6 +26,7 @@ Rekam audio  →  Transkripsi (faster-whisper lokal / Gemini cloud)  →  Notule
 - 🎥 **YouTube langsung**: download audio dari URL YouTube dengan `--youtube <url>` — otomatis diunduh, dikonversi, ditranskripsi, dan dibuat notulen.
 - 🎙️ **Dua sumber perekaman**: mikrofon (`mic`) atau **audio sistem langsung dari Windows** via WASAPI loopback (`loopback`) — menangkap suara *semua* peserta rapat Zoom tanpa fitur rekam bawaan.
 - ⏹️ **Hentikan rekaman kapan saja**: tekan **`q`** (atau **Ctrl+C**) saat merekam — rekaman berhenti, audio yang sudah terekam **tetap disimpan** lalu langsung diproses ke transkripsi & notulen. Jika dihentikan sangat cepat (< 2 detik), muncul peringatan "rekaman sangat pendek".
+- ⏸️ **Pause/Resume rekaman**: tekan **`p`** untuk pause, tekan **`p`** atau **`r`** lagi untuk resume. Waktu pause tidak dihitung dalam durasi rekaman.
 - 📄 **Transkripsi bahasa Indonesia** (atau bahasa lain) dengan dua mesin: **faster-whisper lokal** (CTranslate2 + INT8 + VAD, **±4× lebih cepat** dari OpenAI Whisper di CPU) atau **transkripsi cloud Gemini** (`--engine gemini` — super cepat, verbatim, ber-timestamp **+ speaker diarization**).
 - 📂 **Transkrip mentah otomatis disimpan** ke `Transkrip_<timestamp>.txt` untuk dokumentasi & audit.
 - 🔊 **Deteksi rekaman sunyi otomatis** — RMS audio diukur sebelum transkripsi; jika hampir diam, peringatan jelas (dengan angka & penyebab) ditampilkan lebih dulu.

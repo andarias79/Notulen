@@ -111,6 +111,8 @@ GEMINI_TEMPERATURE = 0.2  # temperature rendah -> output notulen lebih konsisten
 # Tombol untuk menghentikan perekaman lebih awal: tekan 'q' (atau Ctrl+C).
 # Perekaman berhenti, audio yang sudah terekam TETAP disimpan & langsung diproses.
 TOMBOL_HENTI = "q"
+TOMBOL_PAUSE = "p"   # tekan 'p' untuk pause/resume perekaman
+TOMBOL_RESUME = "r"  # alias: 'r' juga bisa untuk resume (selain 'p')
 
 KONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "konfigurasi.json")
 PILIHAN_SUMBER = ("mic", "loopback")
@@ -216,11 +218,14 @@ def _deteksi_msvcrt():
         return None
 
 
-def _pantau_tombol_henti(berhenti):
-    """Utas latar: menunggu tombol henti (default 'q') di konsol lalu menandai flag.
+def _pantau_tombol_henti(berhenti, pause_event=None):
+    """Utas latar: menunggu tombol henti ('q') atau pause ('p'/'r') di konsol.
 
     Hanya aktif di Windows (msvcrt). Di OS lain (tanpa msvcrt) utas berakhir
     seketika - Ctrl+C tetap bisa dipakai sebagai penghenti darurat.
+
+    berhenti: threading.Event - ditandai saat 'q' ditekan
+    pause_event: threading.Event - ditandai saat 'p' ditekan (pause), di-clear saat 'r' (resume)
     """
     msvcrt = _deteksi_msvcrt()
     if msvcrt is None:
@@ -232,15 +237,28 @@ def _pantau_tombol_henti(berhenti):
                 berhenti.set()
                 print(f"\n-> Tombol '{TOMBOL_HENTI}' ditekan: menghentikan perekaman...")
                 return
+            elif pause_event is not None and tombol in (TOMBOL_PAUSE.encode(), TOMBOL_RESUME.encode()):
+                if pause_event.is_set():
+                    # Sedang pause -> resume
+                    pause_event.clear()
+                    print(f"\n-> Tombol '{tombol.decode()}': Resume perekaman...", end="", flush=True)
+                else:
+                    # Sedang rekam -> pause
+                    pause_event.set()
+                    print(f"\n-> Tombol '{tombol.decode()}': PAUSE perekaman...", end="", flush=True)
         time.sleep(0.05)
 
 
-def _rekam_berhenti():
-    """Memulai utas pemantau tombol henti. Mengembalikan threading.Event (atau None)."""
+def _rekam_berhenti_dengan_pause():
+    """Memulai utas pemantau tombol henti DAN pause/resume.
+
+    Mengembalikan tuple (berhenti_event, pause_event).
+    """
     berhenti = threading.Event()
-    utas = threading.Thread(target=_pantau_tombol_henti, args=(berhenti,), daemon=True)
+    pause = threading.Event()
+    utas = threading.Thread(target=_pantau_tombol_henti, args=(berhenti, pause), daemon=True)
     utas.start()
-    return berhenti
+    return berhenti, pause
 
 
 def _berhenti_ditekan(berhenti):
@@ -276,7 +294,7 @@ def rekam_audio(durasi_detik, nama_file):
     Mengembalikan durasi yang benar-benar terekam (detik).
     """
     print(f"\n[1/3] Merekam audio rapat selama {durasi_detik} detik (16 kHz mono)...")
-    print(f"      Tekan '{TOMBOL_HENTI}' (atau Ctrl+C) untuk menghentikan lebih awal.")
+    print(f"      Tekan '{TOMBOL_HENTI}' = stop | '{TOMBOL_PAUSE}' = pause/resume")
     try:
         channels = KANAL_REKAM
         sampwidth = 2  # paInt16
@@ -285,8 +303,10 @@ def rekam_audio(durasi_detik, nama_file):
         frame_bytes = sampwidth * channels
         progress_interval = int(PROGRESS_INTERVAL * SAMPLE_RATE)  # cetak progress tiap N detik
         terakhir_progress = 0
+        waktu_pause_total = 0  # total waktu dalam mode pause
+        waktu_pause_mulai = 0  # kapan pause dimulai
 
-        berhenti = _rekam_berhenti()
+        berhenti, pause_event = _rekam_berhenti_dengan_pause()
         try:
             with sd.RawInputStream(
                 samplerate=SAMPLE_RATE,
@@ -302,6 +322,18 @@ def rekam_audio(durasi_detik, nama_file):
                     while total_read < total_frames:
                         if _berhenti_ditekan(berhenti):
                             break
+
+                        # Handle pause/resume
+                        if pause_event.is_set():
+                            if waktu_pause_mulai == 0:
+                                waktu_pause_mulai = time.time()
+                            time.sleep(0.1)  # hemat CPU saat pause
+                            continue
+                        elif waktu_pause_mulai > 0:
+                            # Resume dari pause
+                            waktu_pause_total += time.time() - waktu_pause_mulai
+                            waktu_pause_mulai = 0
+
                         try:
                             data, overflowed = stream.read(chunk)
                         except KeyboardInterrupt:
@@ -404,6 +436,7 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
         sample_rate = int(device["defaultSampleRate"])
         chunk = 1024
         print(f"-> Merekam dari: {device['name']} ({channels} kanal, {sample_rate} Hz)")
+        print(f"      Tekan '{TOMBOL_HENTI}' = stop | '{TOMBOL_PAUSE}' = pause/resume")
 
         try:
             # Catatan: perangkat loopback sudah menjadi perangkat input WASAPI,
@@ -427,7 +460,9 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
         total_read = 0
         progress_interval = int(PROGRESS_INTERVAL * sample_rate)
         terakhir_progress = 0
-        berhenti = _rekam_berhenti()
+        waktu_pause_total = 0
+        waktu_pause_mulai = 0
+        berhenti, pause_event = _rekam_berhenti_dengan_pause()
         try:
             try:
                 with wave.open(nama_file, "wb") as wf:
@@ -437,6 +472,18 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
                     while total_read < total_frames:
                         if _berhenti_ditekan(berhenti):
                             break
+
+                        # Handle pause/resume
+                        if pause_event.is_set():
+                            if waktu_pause_mulai == 0:
+                                waktu_pause_mulai = time.time()
+                            time.sleep(0.1)  # hemat CPU saat pause
+                            continue
+                        elif waktu_pause_mulai > 0:
+                            # Resume dari pause
+                            waktu_pause_total += time.time() - waktu_pause_mulai
+                            waktu_pause_mulai = 0
+
                         try:
                             data = stream.read(chunk, exception_on_overflow=False)
                         except KeyboardInterrupt:
