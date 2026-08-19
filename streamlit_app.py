@@ -73,6 +73,8 @@ if "transkrip" not in st.session_state:
     st.session_state.transkrip = None
 if "notulen" not in st.session_state:
     st.session_state.notulen = None
+if "notulen_original" not in st.session_state:
+    st.session_state.notulen_original = None
 if "audio_file" not in st.session_state:
     st.session_state.audio_file = None
 if "is_recording" not in st.session_state:
@@ -164,6 +166,9 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
     # Simpan notulen
     nama_notulen = os.path.join(DIR_NOTULEN, f"Notulen_Rapat_{timestamp}")
     zoom_notulen.simpan_notulen(notulen, nama_notulen, "both")
+    
+    # Simpan notulen asli untuk fitur edit/reset
+    st.session_state.notulen_original = notulen
 
     # 3. Subtitle (opsional)
     if subtitle != "none":
@@ -433,7 +438,57 @@ with tab3:
 
         with col2:
             st.subheader("📋 Notulen")
-            st.markdown(st.session_state.notulen)
+            
+            # Mode toggle: Preview atau Edit
+            mode_notulen = st.radio(
+                "Mode Notulen",
+                options=["preview", "edit"],
+                format_func=lambda x: "👁️ Preview" if x == "preview" else "✏️ Edit",
+                horizontal=True,
+                key="mode_notulen",
+            )
+
+            if mode_notulen == "preview":
+                # Mode preview: tampilkan markdown
+                st.markdown(st.session_state.notulen)
+            else:
+                # Mode edit: text area untuk edit
+                notulen_edited = st.text_area(
+                    "Edit Notulen",
+                    value=st.session_state.notulen,
+                    height=400,
+                    key="notulen_edit",
+                )
+                
+                # Tombol simpan perubahan
+                col_save, col_reset, col_regenerate = st.columns(3)
+                
+                with col_save:
+                    if st.button("💾 Simpan Perubahan", type="primary", use_container_width=True):
+                        st.session_state.notulen = notulen_edited
+                        # Simpan ke file
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        DIR_NOTULEN = "Hasil_Notulen"
+                        os.makedirs(DIR_NOTULEN, exist_ok=True)
+                        nama_file = os.path.join(DIR_NOTULEN, f"Notulen_Edited_{timestamp}.md")
+                        with open(nama_file, "w", encoding="utf-8") as f:
+                            f.write(notulen_edited)
+                        st.success(f"✅ Perubahan tersimpan ke {nama_file}")
+                        st.rerun()
+                
+                with col_reset:
+                    if st.button("🔄 Reset ke Asli", use_container_width=True):
+                        st.session_state.notulen = st.session_state.notulen_original if hasattr(st.session_state, 'notulen_original') else st.session_state.notulen
+                        st.info("🔄 Notulen dikembalikan ke asli.")
+                        st.rerun()
+                
+                with col_regenerate:
+                    if st.button("🤖 Generate Ulang", use_container_width=True):
+                        st.info("⏳ Membuat notulen baru...")
+                        # Simpan notulen asli jika belum ada
+                        if not hasattr(st.session_state, 'notulen_original'):
+                            st.session_state.notulen_original = st.session_state.notulen
+                        st.rerun()
 
         # Tombol download
         st.subheader("💾 Download Hasil")
@@ -462,6 +517,11 @@ with tab3:
                 file_name=f"notulen_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                 mime="text/plain",
             )
+        
+        # Tampilkan info perubahan
+        if hasattr(st.session_state, 'notulen_original'):
+            if st.session_state.notulen != st.session_state.notulen_original:
+                st.warning("⚠️ Notulen telah dimodifikasi. Klik 'Simpan Perubahan' untuk menyimpan.")
     else:
         st.info("🔄 Belum ada hasil. Upload audio atau rekam terlebih dahulu di tab 'Upload Audio/Video' atau 'Rekam Audio'.")
 
