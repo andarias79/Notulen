@@ -100,6 +100,7 @@ GEMINI_TUNGGU_FILE_DETIK = 600       # waktu tunggu maksimal file diproses di se
 WHISPER_MODEL = "large-v3-turbo"
 WHISPER_BEAM_SIZE = 5   # beam search; 4-8 = sweet-spot kecepatan/akurasi di CTranslate2
 WHISPER_VAD = True      # lewati bagian sunyi (silero VAD) -> lebih cepat & hasil lebih rapi
+WHISPER_VAD_THOLD = 0.5  # threshold VAD: 0.5 = default (lebih toleran dari 0.35)
 SAMPLE_RATE = 16000     # 16 kHz mono = standar Whisper -> file 4x lebih kecil dari 44.1 kHz stereo
 KANAL_REKAM = 1         # mono cukup untuk transkripsi ucapan
 AMBANG_RMS_SENYAP = 0.005  # di bawah nilai ini, rekaman dianggap hampir sunyi
@@ -150,6 +151,7 @@ def terapkan_konfigurasi(args, konfig):
         "notulen_mode": "multi",
         "subtitle": "none",
         "translate": None,
+        "no_vad": False,
     }
 
     # 1. Dari file konfigurasi
@@ -1014,7 +1016,7 @@ def ukur_rms(nama_file):
         return None
 
 
-def transkripsi_audio(nama_file, bahasa, engine="lokal", konteks=None):
+def transkripsi_audio(nama_file, bahasa, engine="lokal", konteks=None, no_vad=False):
     """Dispatcher transkripsi: memilih engine 'lokal' (faster-whisper, offline)
     atau 'gemini' (transkripsi cloud via Gemini AI - super cepat).
 
@@ -1022,13 +1024,14 @@ def transkripsi_audio(nama_file, bahasa, engine="lokal", konteks=None):
     menambahkan speaker diarization).
 
     konteks: teks konteks/istilah domain untuk meningkatkan akurasi (opsional).
+    no_vad: jika True, nonaktifkan VAD filter (untuk audio yang tidak terpotong).
     """
     if engine == "gemini":
         return transkripsi_audio_gemini(nama_file, bahasa, konteks=konteks)
-    return transkripsi_audio_lokal(nama_file, bahasa, konteks=konteks)
+    return transkripsi_audio_lokal(nama_file, bahasa, konteks=konteks, no_vad=no_vad)
 
 
-def transkripsi_audio_lokal(nama_file, bahasa, konteks=None):
+def transkripsi_audio_lokal(nama_file, bahasa, konteks=None, no_vad=False):
     """Mengubah file audio menjadi teks menggunakan faster-whisper (CTranslate2 + INT8).
 
     Jauh lebih cepat daripada openai-whisper (hingga ±4x di CPU) berkat engine
@@ -1049,13 +1052,27 @@ def transkripsi_audio_lokal(nama_file, bahasa, konteks=None):
     print("      (model CTranslate2 diunduh otomatis saat pertama kali dipakai)")
     if konteks:
         print(f"      (konteks domain: {konteks[:80]}{'...' if len(konteks) > 80 else ''})")
+    # Tentukan apakah VAD aktif atau tidak
+    vad_aktif = WHISPER_VAD and not no_vad
+    if no_vad:
+        print("      ⚠️ VAD dinonaktifkan (--no-vad). Semua bagian audio akan diproses.")
+
     try:
         model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
         opsi_transkrip = {
             "language": bahasa if bahasa != "auto" else None,
             "beam_size": WHISPER_BEAM_SIZE,
-            "vad_filter": WHISPER_VAD,
+            "vad_filter": vad_aktif,
         }
+        # VAD filter parameters: threshold lebih tinggi = lebih toleran
+        # (tidak terlalu agresif menghapus suara)
+        if vad_aktif:
+            opsi_transkrip["vad_parameters"] = {
+                "threshold": WHISPER_VAD_THOLD,  # 0.5 = lebih toleran
+                "min_speech_duration_ms": 250,    # min 250ms dianggap suara
+                "min_silence_duration_ms": 500,   # min 500ms dianggap sunyi
+                "speech_pad_ms": 200,             # padding 200ms sebelum/sesudah suara
+            }
         # initial_prompt memberikan konteks domain ke Whisper agar istilah teknis
         # (mis. singkatan, nama organisasi, jargon) lebih akurat dikenali.
         if konteks:
@@ -1063,6 +1080,7 @@ def transkripsi_audio_lokal(nama_file, bahasa, konteks=None):
             # hot-words: meningkatkan probabilitas kata-kata tertentu di Whisper
             # (space-separated). Sangat membantu untuk istilah teknis yang jarang.
             opsi_transkrip["hotwords"] = konteks
+        print(f"      VAD: {'aktif (threshold=' + str(WHISPER_VAD_THOLD) + ')' if vad_aktif else 'nonaktif'}")
         segmen, info = model.transcribe(nama_file, **opsi_transkrip)
         segmen = list(segmen)  # generator lazy -> jalankan seluruh inferensi
     except Exception as e:
@@ -2415,6 +2433,12 @@ def buat_parser():
              "Default: pasangan loopback dari perangkat output default."
     )
     parser.add_argument(
+        "--no-vad", action="store_true", default=False,
+        help="Nonaktifkan VAD (Voice Activity Detection) pada transkripsi lokal. "
+             "Gunakan jika transkripsi terlalu pendek atau banyak bagian yang hilang. "
+             "VAD bisa terlalu agresif pada audio dengan volume rendah."
+    )
+    parser.add_argument(
         "--format", choices=["md", "txt", "both"], default=None,
         help="Format file notulen yang disimpan: 'md' = Markdown, 'txt' = teks polos, "
              "'both' = keduanya (default)."
@@ -2712,7 +2736,7 @@ def main():
             audio_transkripsi = jalur_bersih
 
     transkrip_teks = transkripsi_audio(audio_transkripsi, cfg["bahasa"], cfg["engine"],
-                                       konteks=cfg["konteks"])
+                                       konteks=cfg["konteks"], no_vad=cfg.get("no_vad", False))
 
     # Hapus file noise-reduced sementara setelah transkripsi selesai
     if jalur_bersih:

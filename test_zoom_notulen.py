@@ -1036,12 +1036,12 @@ class TestTranskripsi(unittest.TestCase):
     def test_bahasa_explisit_diteruskan_ke_faster_whisper(self):
         hasil, model = self._panggil([(0.0, 5.0, "Halo dunia")], "id")
         self.assertEqual(hasil, "[00:00] Halo dunia")
-        model.transcribe.assert_called_once_with(
-            "a.wav",
-            language="id",
-            beam_size=zoom_notulen.WHISPER_BEAM_SIZE,
-            vad_filter=zoom_notulen.WHISPER_VAD,
-        )
+        # VAD aktif dengan parameter tambahan
+        call_kwargs = model.transcribe.call_args.kwargs
+        self.assertEqual(call_kwargs["language"], "id")
+        self.assertEqual(call_kwargs["beam_size"], zoom_notulen.WHISPER_BEAM_SIZE)
+        self.assertTrue(call_kwargs["vad_filter"])  # VAD aktif
+        self.assertIn("vad_parameters", call_kwargs)  # ada parameter VAD
 
     def test_konteks_menambahkan_hotwords_ke_transkrip(self):
         """Konteks domain diteruskan sebagai initial_prompt DAN hotwords."""
