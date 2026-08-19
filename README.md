@@ -181,6 +181,27 @@ Double-click `run.bat` untuk menjalankan skrip dengan konfigurasi default:
 
 `run.bat` otomatis: pindah ke folder skrip, mengaktifkan virtual environment (`.venv`/`venv`) jika ada, memeriksa Python, dan menampilkan pesan solusi jika gagal (tanpa menutup jendela).
 
+### 🌐 Web UI (Streamlit)
+
+Jalankan interface web untuk kemudahan penggunaan:
+
+```bash
+# Install streamlit (sudah di requirements.txt)
+pip install streamlit
+
+# Jalankan web UI
+streamlit run streamlit_app.py
+
+# Buka browser: http://localhost:8501
+```
+
+**Fitur Web UI:**
+- 📁 Upload audio/video langsung di browser
+- 🎙️ Rekam audio dari mikrofon
+- 📊 Lihat transkrip dan notulen side-by-side
+- 💾 Download hasil dalam berbagai format
+- ⚙️ Pengaturan engine, bahasa, subtitle, translate, PDF
+
 #### 🎚️ Pilih engine transkripsi (lokal / gemini)
 
 Menu **1** (Rekam mikrofon), **2** (Loopback), dan **5** (Proses file audio) kini
@@ -515,21 +536,22 @@ di bagian atas `audit_notulen.py`.
 
 ```
 Notulen/
-├── zoom_notulen.py       # skrip utama
-├── index_notulen.py           # buat daftar isi semua notulen
-├── konfigurasi.example.json    # template pengaturan default rapat (salin → konfigurasi.json)
-├── test_zoom_notulen.py       # tes unit skrip utama (unittest)
-├── test_index_notulen.py      # tes unit skrip index (unittest)
-├── test_audit_notulen.py      # tes unit audit_notulen (unittest)
-├── audit_notulen.py           # audit anti-halusinasi: cek Action Items vs transkrip (jalankan kapan pun)
-├── run.bat               # peluncur sekali-klik: menu rekam/index/tes + pilih engine lokal/gemini (Windows)
-├── run-index.bat         # buat index notulen sekali-klik (Windows)
-├── run-test.bat          # jalankan tes unit sekali-klik (Windows)
+├── zoom_notulen.py       # skrip utama (CLI)
+├── streamlit_app.py     # web UI (Streamlit)
+├── index_notulen.py     # buat daftar isi semua notulen
+├── audit_notulen.py     # audit anti-halusinasi
+├── konfigurasi.example.json  # template pengaturan
+├── test_zoom_notulen.py      # tes unit skrip utama
+├── test_index_notulen.py     # tes unit index
+├── test_audit_notulen.py     # tes unit audit
+├── run.bat              # peluncur Windows (menu)
+├── run-index.bat        # buat index sekali-klik
+├── run-test.bat         # jalankan tes sekali-klik
 ├── requirements.txt     # dependensi
-├── .env.example         # template API key (salin → .env)
-├── .env                 # API key Anda (TIDAK di-commit)
+├── .env.example         # template API key
+├── .env                 # API key Anda
 ├── .gitignore           # file yang diabaikan git
-└── README.md            # dokumentasi ini
+└── README.md            # dokumentasi
 ```
 
 ---
