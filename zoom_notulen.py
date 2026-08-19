@@ -434,19 +434,23 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
                         "\nERROR: perangkat loopback WASAPI tidak ditemukan. Coba --list-devices."
                     )
 
-        channels = device["maxInputChannels"]
-        sample_rate = int(device["defaultSampleRate"])
+        # SELALU rekam di 16 kHz mono untuk efisiensi (file 6x lebih kecil)
+        # WASAPI loopback mendukung resampling otomatis
+        channels_rekam = KANAL_REKAM  # mono
+        sample_rate_rekam = SAMPLE_RATE  # 16 kHz
         chunk = 1024
-        print(f"-> Merekam dari: {device['name']} ({channels} kanal, {sample_rate} Hz)")
+        print(f"-> Merekam dari: {device['name']}")
+        print(f"      Format: {sample_rate_rekam} Hz mono (hemat ruang disk)")
         print(f"      Tekan '{TOMBOL_HENTI}' = stop | '{TOMBOL_PAUSE}' = pause/resume")
 
         try:
             # Catatan: perangkat loopback sudah menjadi perangkat input WASAPI,
             # jadi cukup pilih via input_device_index (tanpa argumen as_loopback).
+            # WASAPI akan melakukan resampling otomatis ke sample rate yang diminta.
             stream = p.open(
                 format=pyaudio.paInt16,
-                channels=channels,
-                rate=sample_rate,
+                channels=channels_rekam,
+                rate=sample_rate_rekam,
                 frames_per_buffer=chunk,
                 input=True,
                 input_device_index=device["index"],
@@ -457,10 +461,10 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
                 f"Detail: {e}\nPastikan perangkat output aktif dan tidak dipakai aplikasi lain."
             ) from e
 
-        total_frames = int(durasi_detik * sample_rate)
-        frame_bytes = 2 * channels  # paInt16 = 2 byte per frame per kanal
+        total_frames = int(durasi_detik * sample_rate_rekam)
+        frame_bytes = 2 * channels_rekam  # paInt16 = 2 byte per frame per kanal
         total_read = 0
-        progress_interval = int(PROGRESS_INTERVAL * sample_rate)
+        progress_interval = int(PROGRESS_INTERVAL * sample_rate_rekam)
         terakhir_progress = 0
         waktu_pause_total = 0
         waktu_pause_mulai = 0
@@ -468,9 +472,9 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
         try:
             try:
                 with wave.open(nama_file, "wb") as wf:
-                    wf.setnchannels(channels)
+                    wf.setnchannels(channels_rekam)
                     wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
-                    wf.setframerate(sample_rate)
+                    wf.setframerate(sample_rate_rekam)
                     while total_read < total_frames:
                         if _berhenti_ditekan(berhenti):
                             break
@@ -502,9 +506,9 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
                         total_read += frames_diperoleh
                         # Progress bar: cetak setiap PROGRESS_INTERVAL detik
                         if total_read - terakhir_progress >= progress_interval:
-                            _cetak_progress(total_read, total_frames, sample_rate)
+                            _cetak_progress(total_read, total_frames, sample_rate_rekam)
                             terakhir_progress = total_read
-                    _cetak_progress(total_read, total_frames, sample_rate)
+                    _cetak_progress(total_read, total_frames, sample_rate_rekam)
                     print()
             except KeyboardInterrupt:
                 print("\n-> Perekaman dihentikan (Ctrl+C). Audio disimpan & diproses.")
@@ -517,22 +521,12 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
                 berhenti.set()
             stream.stop_stream()
             stream.close()
-    durasi_aktual = total_read / sample_rate
+    durasi_aktual = total_read / sample_rate_rekam
     if durasi_aktual < durasi_detik - 0.5:
         print(
             f"-> Perekaman dihentikan lebih awal setelah {durasi_aktual:.1f} detik. "
             "Audio tetap disimpan & akan diproses."
         )
-    # Resample audio loopback ke 16 kHz mono agar Whisper dan upload lebih efisien
-    if sample_rate != SAMPLE_RATE or channels != KANAL_REKAM:
-        nama_resample = _resample_ke_16khz(nama_file, sample_rate, channels)
-        if nama_resample:
-            print(f"-> Audio di-resample ke 16 kHz mono: {nama_resample}")
-            # Ganti nama_file agar pipeline selanjutnya pakai file yang sudah resample
-            try:
-                os.replace(nama_resample, nama_file)
-            except OSError:
-                pass  # jika rename gagal, pakai file asli
     print(f"-> Perekaman selesai. File disimpan sebagai: {nama_file}")
     return durasi_aktual
 
