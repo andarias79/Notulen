@@ -1567,5 +1567,117 @@ class TestTranslateIntegration(unittest.TestCase):
         self.assertIsNone(cfg["translate"])
 
 
+class TestSearch(unittest.TestCase):
+    """Tes fungsi search_transkrip."""
+
+    TRANSKRIP_CONTOH = (
+        "[00:05] Halo semuanya, selamat pagi.\n"
+        "[00:10] Pembicara 1: Mari kita bahas action items hari ini.\n"
+        "[01:30] Pembicara 2: Action items untuk Budi sudah selesai.\n"
+        "[02:00] Pembicara 1: Bagus, ada lagi action items lain?\n"
+    )
+
+    def test_search_argumen_diterima(self):
+        args = zoom_notulen.buat_parser().parse_args(["--search", "action"])
+        self.assertEqual(args.search, "action")
+
+    def test_search_default_none(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        self.assertIsNone(args.search)
+
+    def test_search_regex_argumen(self):
+        args = zoom_notulen.buat_parser().parse_args(["--search-regex"])
+        self.assertTrue(args.search_regex)
+
+    def test_search_case_argumen(self):
+        args = zoom_notulen.buat_parser().parse_args(["--search-case"])
+        self.assertTrue(args.search_case)
+
+    def test_search_menemukan_kata(self):
+        """Search harus menemukan semua kemunculan kata kunci."""
+        hasil = zoom_notulen.search_transkrip(self.TRANSKRIP_CONTOH, "action items")
+        self.assertEqual(len(hasil), 3)  # 3 baris mengandung "action items"
+        self.assertEqual(hasil[0]["timestamp"], "[00:10]")
+
+    def test_search_case_insensitive(self):
+        """Default search harus case-insensitive."""
+        hasil = zoom_notulen.search_transkrip(self.TRANSKRIP_CONTOH, "ACTION")
+        self.assertEqual(len(hasil), 3)
+
+    def test_search_case_sensitive(self):
+        """Search case-sensitive harus membedakan huruf besar/kecil."""
+        # "action" lowercase hanya cocok di baris 1 dan 3 (baris 2 pakai "Action")
+        hasil = zoom_notulen.search_transkrip(
+            self.TRANSKRIP_CONTOH, "action", case_sensitive=True
+        )
+        self.assertEqual(len(hasil), 2)  # baris 1 dan 3 punya "action" lowercase
+        # Coba dengan "Action" capital - hanya cocok di baris 2
+        hasil2 = zoom_notulen.search_transkrip(
+            self.TRANSKRIP_CONTOH, "Action", case_sensitive=True
+        )
+        self.assertEqual(len(hasil2), 1)  # baris 2 punya "Action" capital
+
+    def test_search_regex(self):
+        """Search regex harus bekerja dengan benar."""
+        hasil = zoom_notulen.search_transkrip(
+            self.TRANSKRIP_CONTOH, r"action.{0,5}items", use_regex=True
+        )
+        self.assertEqual(len(hasil), 3)
+
+    def test_search_tidak_ditemukan(self):
+        """Jika tidak ditemukan, hasil harus kosong."""
+        hasil = zoom_notulen.search_transkrip(self.TRANSKRIP_CONTOH, "xyz123")
+        self.assertEqual(len(hasil), 0)
+
+    def test_search_timestamp_diekstrak(self):
+        """Timestamp harus diekstrak dengan benar."""
+        hasil = zoom_notulen.search_transkrip(self.TRANSKRIP_CONTOH, "Budi")
+        self.assertEqual(len(hasil), 1)
+        self.assertEqual(hasil[0]["timestamp"], "[01:30]")
+        self.assertIn("Budi", hasil[0]["text"])
+
+    def test_search_line_number(self):
+        """Nomor baris harus benar."""
+        hasil = zoom_notulen.search_transkrip(self.TRANSKRIP_CONTOH, "Budi")
+        self.assertEqual(hasil[0]["line"], 3)  # baris ke-3
+
+    def test_simpan_hasil_search(self):
+        """simpan_hasil_search harus membuat file .txt."""
+        hasil = zoom_notulen.search_transkrip(self.TRANSKRIP_CONTOH, "action")
+        with tempfile.TemporaryDirectory() as d:
+            nama = os.path.join(d, "search.txt")
+            zoom_notulen.simpan_hasil_search(hasil, "action", nama)
+            self.assertTrue(os.path.isfile(nama))
+            with open(nama, "r", encoding="utf-8") as f:
+                isi = f.read()
+            self.assertIn("action", isi)
+            self.assertIn("3 hasil", isi)
+
+    def test_cetak_hasil_search_kosong(self):
+        """cetak_hasil_search untuk hasil kosong tidak boleh error."""
+        # Seharusnya tidak raise exception
+        zoom_notulen.cetak_hasil_search([], "tidak_ada")
+
+
+class TestSearchIntegration(unittest.TestCase):
+    """Tes integrasi search ke parser."""
+
+    def test_search_dengan_transkrip(self):
+        """--search + --transkrip harus bekerja bersama."""
+        args = zoom_notulen.buat_parser().parse_args(
+            ["--search", "test", "--transkrip", "file.txt"]
+        )
+        self.assertEqual(args.search, "test")
+        self.assertEqual(args.transkrip, "file.txt")
+
+    def test_search_dengan_audio(self):
+        """--search + --audio harus transkripsi dulu lalu cari."""
+        args = zoom_notulen.buat_parser().parse_args(
+            ["--search", "test", "--audio", "audio.wav"]
+        )
+        self.assertEqual(args.search, "test")
+        self.assertEqual(args.audio, "audio.wav")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,7 @@ Rekam audio  →  Transkripsi (faster-whisper lokal / Gemini cloud)  →  Notule
 - 📁 **Batch proses folder**: `--folder <path>` memproses semua file audio/video di folder secara otomatis.
 - 📄 **Subtitle/Caption generator**: buat file subtitle `.srt` (SubRip) atau `.vtt` (WebVTT) dari transkrip untuk video player.
 - 🌐 **Translate transkrip**: terjemahkan transkrip ke bahasa lain via Gemini (`--translate en`, `--translate ja`, dll.). Mempertahankan format timestamp dan label pembicara.
+- 🔍 **Search di transkrip**: cari kata/frasa di transkrip dengan `--search "kata kunci"`. Mendukung regex dan case-sensitive.
 
 ---
 
@@ -250,6 +251,18 @@ python zoom_notulen.py --audio rapat.wav --translate ja
 # Translate + subtitle sekaligus
 python zoom_notulen.py --audio rapat.wav --translate en --subtitle srt
 
+# Cari "action items" di transkrip
+python zoom_notulen.py --search "action items"
+
+# Cari dengan regex
+python zoom_notulen.py --search "rapat.{0,10}senin" --search-regex
+
+# Cari case-sensitive (huruf besar/kecil berbeda)
+python zoom_notulen.py --search "Budi" --search-case
+
+# Cari di file transkrip tertentu
+python zoom_notulen.py --search "Budi" --transkrip Hasil_Transkripsi/Transkrip_xxx.txt
+
 # SUPER CEPAT: transkripsi cloud via Gemini (verbatim + timestamp + pembicara)
 python zoom_notulen.py --audio rekaman_zoom.wav --engine gemini
 
@@ -283,6 +296,9 @@ python zoom_notulen.py --durasi 3600 --tujuan-email "budi@mail.com, siti@mail.co
 | `--format {md, txt, both}` | `both` | Format output notulen |
 | `--subtitle {srt, vtt, both, none}` | `none` | Buat file subtitle: `srt` = SubRip (.srt), `vtt` = WebVTT (.vtt), `both` = keduanya |
 | `--translate <bahasa>` | — | Terjemahkan transkrip via Gemini: `en` (Inggris), `ja` (Jepang), `ko` (Korea), `zh` (China), `ms` (Melayu), dll. |
+| `--search <kata>` | — | Cari kata/frasa di transkrip. Mendukung regex dengan `--search-regex` |
+| `--search-regex` | off | Gunakan mode regex untuk `--search` |
+| `--search-case` | off | Huruf besar/kecil berbeda saat search (default: case-insensitive) |
 | `--judul <teks>` | otomatis | Judul notulen (dipakai Gemini di heading `# Notulen Rapat - ...`). Jika kosong, Gemini menentukan topik dari transkrip |
 | `--daftar-peserta <teks>` | — | Daftar peserta rapat dipisah koma (mis. `"Budi, Siti, Andi"`). Disertakan sebagai bagian `## Daftar Peserta` di notulen |
 | `--tujuan-email <teks>` | — | Email penerima notulen dipisah koma (mis. `"budi@mail.com, siti@mail.com"`). Kirim notulen via Resend API setelah dibuat |

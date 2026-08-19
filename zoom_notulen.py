@@ -2058,6 +2058,110 @@ def simpan_translate(teks_translate, nama_dasar, bahasa_tujuan):
 
 
 # ==========================================
+# 6d. FUNGSI SEARCH DI TRANKRIP
+# ==========================================
+def search_transkrip(teks_transkrip, kata_kunci, case_sensitive=False, use_regex=False):
+    """Mencari kata/frasa di transkrip dan mengembalikan hasil yang cocok.
+
+    kata_kunci: string yang dicari (bisa berupa regex jika use_regex=True)
+    case_sensitive: True = huruf besar/kecil berbeda, False = case-insensitive
+    use_regex: True = gunakan regex, False = pencarian literal
+
+    Mengembalikan list dict: [{"line": nomor_baris, "timestamp": "[MM:SS]", "text": teks}, ...]
+    """
+    hasil = []
+    flags = 0 if case_sensitive else re.IGNORECASE
+
+    try:
+        if use_regex:
+            pola = re.compile(kata_kunci, flags)
+        else:
+            # Escape karakter regex untuk pencarian literal
+            pola = re.compile(re.escape(kata_kunci), flags)
+    except re.error as e:
+        print(f"-> Error regex: {e}")
+        return hasil
+
+    for i, baris in enumerate(teks_transkrip.splitlines(), 1):
+        baris_strip = baris.strip()
+        if not baris_strip:
+            continue
+
+        if pola.search(baris_strip):
+            # Ekstrak timestamp jika ada
+            match_ts = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.*)", baris_strip)
+            if match_ts:
+                timestamp = match_ts.group(1)
+                teks = match_ts.group(2)
+            else:
+                timestamp = ""
+                teks = baris_strip
+
+            hasil.append({
+                "line": i,
+                "timestamp": timestamp,
+                "text": teks,
+                "raw": baris_strip,
+            })
+
+    return hasil
+
+
+def cetak_hasil_search(hasil, kata_kunci, max_hasil=50):
+    """Mencetak hasil search dengan format yang rapi."""
+    if not hasil:
+        print(f"\n-> Tidak ditemukan '{kata_kunci}' di transkrip.")
+        return
+
+    print(f"\n{'='*60}")
+    print(f"  HASIL PENCARIAN: '{kata_kunci}'")
+    print(f"  Ditemukan: {len(hasil)} hasil")
+    print(f"{'='*60}")
+
+    for i, h in enumerate(hasil[:max_hasil], 1):
+        ts = h["timestamp"] if h["timestamp"] else f"[baris {h['line']}]"
+        # Highlight kata kunci dalam teks
+        teks = h["text"]
+        pola = re.compile(re.escape(kata_kunci), re.IGNORECASE)
+        teks_highlight = pola.sub(f">>>{kata_kunci.upper()}<<<", teks)
+        print(f"\n  {i}. {ts} {teks_highlight}")
+
+    if len(hasil) > max_hasil:
+        print(f"\n  ... dan {len(hasil) - max_hasil} hasil lainnya.")
+
+    print(f"\n{'='*60}")
+
+
+def simpan_hasil_search(hasil, kata_kunci, nama_file=None):
+    """Menyimpan hasil search ke file .txt."""
+    if not hasil:
+        return None
+
+    if nama_file is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        DIR_SEARCH = "Hasil_Search"
+        os.makedirs(DIR_SEARCH, exist_ok=True)
+        # Bersihkan nama file dari karakter tidak aman
+        kata_bersih = re.sub(r'[^a-zA-Z0-9_]', '_', kata_kunci)[:30]
+        nama_file = os.path.join(DIR_SEARCH, f"search_{kata_bersih}_{timestamp}.txt")
+
+    baris = [f"HASIL PENCARIAN: '{kata_kunci}'"]
+    baris.append(f"Ditemukan: {len(hasil)} hasil")
+    baris.append("=" * 50)
+    baris.append("")
+
+    for i, h in enumerate(hasil, 1):
+        ts = h["timestamp"] if h["timestamp"] else f"[baris {h['line']}]"
+        baris.append(f"{i}. {ts} {h['text']}")
+
+    with open(nama_file, "w", encoding="utf-8") as f:
+        f.write("\n".join(baris))
+
+    print(f"-> Hasil search disimpan: {nama_file}")
+    return nama_file
+
+
+# ==========================================
 # 7. FUNGSI PENGIRIMAN EMAIL (RESEND)
 # ==========================================
 POLA_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -2183,6 +2287,20 @@ def buat_parser():
              "Contoh: --translate en, --translate ja"
     )
     parser.add_argument(
+        "--search", default=None,
+        metavar="KATA_KUNCI",
+        help="Cari kata/frasa di transkrip. Mendukung regex (gunakan --search-regex). "
+             "Contoh: --search \"action items\", --search \"Budi\""
+    )
+    parser.add_argument(
+        "--search-regex", action="store_true", default=False,
+        help="Gunakan mode regex untuk --search (contoh: --search \"rapat.{0,10}senin\" --search-regex)"
+    )
+    parser.add_argument(
+        "--search-case", action="store_true", default=False,
+        help="Huruf besar/kecil berbeda saat search (default: case-insensitive)"
+    )
+    parser.add_argument(
         "--judul", default=None,
         help="Judul notulen (mis. 'Rapat Mingguan Tim Produk'). Jika tidak diisi, "
              "Gemini menentukan topik dari transkrip."
@@ -2260,6 +2378,49 @@ def main():
 
     if args.list_devices:
         daftar_perangkat_loopback()
+        return
+
+    # ======= Mode search: cari di transkrip yang sudah ada =======
+    if args.search:
+        # Cari di file transkrip yang sudah ada
+        if args.transkrip:
+            jalur_transkrip = args.transkrip
+            if not os.path.isfile(jalur_transkrip):
+                raise SystemExit(f"\nERROR: file transkrip tidak ditemukan: {jalur_transkrip}")
+            with open(jalur_transkrip, "r", encoding="utf-8") as f:
+                transkrip_teks = f.read()
+        elif args.audio:
+            # Jika ada file audio, transkripsi dulu lalu cari
+            if not os.path.isfile(args.audio):
+                raise SystemExit(f"\nERROR: file audio tidak ditemukan: {args.audio}")
+            print(f"[INFO] Transkripsi audio dulu, lalu cari: {args.audio}")
+            transkrip_teks = transkripsi_audio(args.audio, cfg["bahasa"], cfg["engine"],
+                                               konteks=cfg["konteks"])
+        else:
+            # Cari di semua file transkrip di folder Hasil_Transkripsi
+            DIR_TRANSKRIP = "Hasil_Transkripsi"
+            if not os.path.isdir(DIR_TRANSKRIP):
+                raise SystemExit(f"\nERROR: folder {DIR_TRANSKRIP} tidak ditemukan.")
+            transkrip_teks = ""
+            for f in sorted(os.listdir(DIR_TRANSKRIP)):
+                if f.endswith(".txt"):
+                    with open(os.path.join(DIR_TRANSKRIP, f), "r", encoding="utf-8") as fh:
+                        transkrip_teks += f"\n--- {f} ---\n" + fh.read()
+            if not transkrip_teks.strip():
+                raise SystemExit(f"\nERROR: tidak ada file transkrip di {DIR_TRANSKRIP}.")
+
+        # Jalankan search
+        hasil = search_transkrip(
+            transkrip_teks,
+            args.search,
+            case_sensitive=args.search_case,
+            use_regex=args.search_regex
+        )
+        cetak_hasil_search(hasil, args.search)
+
+        # Simpan hasil search
+        if hasil:
+            simpan_hasil_search(hasil, args.search)
         return
 
     # Nama file memakai timestamp agar tidak menimpa hasil sebelumnya
