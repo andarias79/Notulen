@@ -555,7 +555,7 @@ class TestKonfigurasi(unittest.TestCase):
         self.assertEqual(cfg["format"], "both")
         self.assertEqual(cfg["bahasa"], "id")
         self.assertEqual(cfg["engine"], "lokal")
-        self.assertEqual(cfg["model"], "gemini-flash-lite-latest")
+        self.assertEqual(cfg["model"], "gemini-3.6-flash")
         self.assertIsNone(cfg["judul"])
         self.assertIsNone(cfg["tujuan_email"])
 
@@ -617,6 +617,8 @@ class TestParsingArgumen(unittest.TestCase):
         self.assertIsNone(args.perangkat)
         self.assertFalse(args.list_devices)
         self.assertFalse(args.abaikan_senyap)
+        self.assertIsNone(args.noise_reduce)
+        self.assertIsNone(args.notulen_mode)
 
     def test_opsi_lengkap(self):
         args = zoom_notulen.buat_parser().parse_args(
@@ -665,6 +667,162 @@ class TestParsingArgumen(unittest.TestCase):
     def test_perangkat_harus_angka(self):
         with self.assertRaises(SystemExit):
             zoom_notulen.buat_parser().parse_args(["--perangkat", "bukan-angka"])
+
+    def test_youtube_argumen_diterima(self):
+        args = zoom_notulen.buat_parser().parse_args(
+            ["--youtube", "https://www.youtube.com/watch?v=abc123"]
+        )
+        self.assertEqual(args.youtube, "https://www.youtube.com/watch?v=abc123")
+        self.assertIsNone(args.audio)
+
+    def test_youtube_default_none(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        self.assertIsNone(args.youtube)
+
+    def test_folder_argumen_diterima(self):
+        args = zoom_notulen.buat_parser().parse_args(
+            ["--folder", "./rekaman"]
+        )
+        self.assertEqual(args.folder, "./rekaman")
+
+    def test_folder_default_none(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        self.assertIsNone(args.folder)
+
+
+class TestUnduhYouTube(unittest.TestCase):
+    """Tes unduh_audio_youtube: download audio dari URL YouTube."""
+
+    def test_ytidlp_belum_terinstal_gagal(self):
+        """Jika yt-dlp belum terinstal, unduh_audio_youtube harus raise SystemExit."""
+        with mock.patch.dict(sys.modules, {"yt_dlp": None}):
+            with self.assertRaises(SystemExit):
+                zoom_notulen.unduh_audio_youtube("https://example.com")
+
+    def test_url_invalid_gagal_download(self):
+        """URL tidak valid harus mengembalikan None (Error ditangkap)."""
+        # Buat exception class palsu yang mirip yt_dlp.utils.DownloadError
+        class FakeDownloadError(Exception):
+            pass
+
+        mock_ydl_module = mock.MagicMock()
+        mock_ydl_module.utils.DownloadError = FakeDownloadError
+
+        mock_instance = mock.MagicMock()
+        mock_instance.extract_info.side_effect = FakeDownloadError("URL tidak valid")
+        mock_ydl_module.YoutubeDL.return_value.__enter__ = mock.MagicMock(
+            return_value=mock_instance
+        )
+        mock_ydl_module.YoutubeDL.return_value.__exit__ = mock.MagicMock(
+            return_value=False
+        )
+
+        with mock.patch.dict(sys.modules, {"yt_dlp": mock_ydl_module}):
+            hasil = zoom_notulen.unduh_audio_youtube("https://invalid-url")
+            # DownloadError ditangkap -> None dikembalikan
+            self.assertIsNone(hasil)
+
+    def test_download_berhasil_file_ditemukan(self):
+        """Download berhasil dan file WAV ditemukan."""
+        mock_ydl_module = mock.MagicMock()
+        mock_instance = mock.MagicMock()
+        mock_instance.extract_info.return_value = {
+            "title": "Video Contoh",
+            "duration": 300,
+        }
+        mock_ydl_module.YoutubeDL.return_value.__enter__ = mock.MagicMock(
+            return_value=mock_instance
+        )
+        mock_ydl_module.YoutubeDL.return_value.__exit__ = mock.MagicMock(
+            return_value=False
+        )
+
+        with mock.patch.dict(sys.modules, {"yt_dlp": mock_ydl_module}):
+            with tempfile.TemporaryDirectory() as d:
+                jalur = os.path.join(d, "test.wav")
+                # Simulasi file sudah ada setelah download
+                with open(jalur, "w") as f:
+                    f.write("fake wav")
+                hasil = zoom_notulen.unduh_audio_youtube(
+                    "https://www.youtube.com/watch?v=test", jalur
+                )
+                self.assertEqual(hasil, jalur)
+
+
+class TestEkstrakAudio(unittest.TestCase):
+    """Tes ekstrak_audio_dari_video: konversi video ke WAV."""
+
+    def test_file_video_dikenali(self):
+        """File dengan ekstensi video harus dikenali."""
+        self.assertTrue(zoom_notulen.adalah_file_audio_video("video.mp4"))
+        self.assertTrue(zoom_notulen.adalah_file_audio_video("video.mkv"))
+        self.assertTrue(zoom_notulen.adalah_file_audio_video("video.avi"))
+        self.assertTrue(zoom_notulen.adalah_file_audio_video("video.mov"))
+
+    def test_file_audio_dikenali(self):
+        """File dengan ekstensi audio harus dikenali."""
+        self.assertTrue(zoom_notulen.adalah_file_audio_video("audio.wav"))
+        self.assertTrue(zoom_notulen.adalah_file_audio_video("audio.mp3"))
+        self.assertTrue(zoom_notulen.adalah_file_audio_video("audio.m4a"))
+        self.assertTrue(zoom_notulen.adalah_file_audio_video("audio.ogg"))
+
+    def test_file_tidak_dikenal(self):
+        """File yang bukan audio/video harus ditolak."""
+        self.assertFalse(zoom_notulen.adalah_file_audio_video("document.txt"))
+        self.assertFalse(zoom_notulen.adalah_file_audio_video("image.jpg"))
+        self.assertFalse(zoom_notulen.adalah_file_audio_video("video.mp4.bak"))
+
+    def test_folder_tidak_ada_gagal(self):
+        """Jika folder tidak ada, proses_folder harus raise SystemExit."""
+        cfg = {"engine": "lokal", "bahasa": "id", "konteks": None, "format": "both", "daftar_peserta": None}
+        with self.assertRaises(SystemExit):
+            zoom_notulen.proses_folder("/folder/tidak/ada", cfg)
+
+    def test_folder_kosong_gagal(self):
+        """Jika folder kosong (tanpa file audio/video), harus raise SystemExit."""
+        cfg = {"engine": "lokal", "bahasa": "id", "konteks": None, "format": "both", "daftar_peserta": None}
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit):
+                zoom_notulen.proses_folder(d, cfg)
+
+    def test_folder_dengan_file_audio_diproses(self):
+        """Folder dengan file audio harus diproses."""
+        cfg = {
+            "engine": "lokal", "bahasa": "id", "konteks": None,
+            "format": "both", "daftar_peserta": None, "judul": None,
+            "notulen_mode": "single"
+        }
+        with tempfile.TemporaryDirectory() as d:
+            # Buat file WAV palsu dengan audio (bukan sunyi)
+            import wave
+            import math
+            wav_path = os.path.join(d, "test.wav")
+            with wave.open(wav_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                # Buat sine wave agar tidak terdeteksi sunyi
+                samples = []
+                for i in range(16000):
+                    val = int(16000 * math.sin(2 * math.pi * 440 * i / 16000))
+                    samples.append(val.to_bytes(2, byteorder='little', signed=True))
+                wf.writeframes(b''.join(samples))
+
+            with mock.patch.object(
+                zoom_notulen, "transkripsi_audio", return_value="Transkrip palsu"
+            ):
+                with mock.patch.object(
+                    zoom_notulen, "_buat_notulen_sesuai_mode", return_value="# Notulen"
+                ):
+                    with mock.patch.object(
+                        zoom_notulen, "simpan_notulen"
+                    ):
+                        with mock.patch.object(
+                            zoom_notulen, "simpan_transkrip"
+                        ):
+                            hasil = zoom_notulen.proses_folder(d, cfg)
+                            self.assertEqual(len(hasil), 1)
+                            self.assertEqual(hasil[0][0], "test.wav")
 
 
 class TestRekamMic(unittest.TestCase):
@@ -884,6 +1042,26 @@ class TestTranskripsi(unittest.TestCase):
             vad_filter=zoom_notulen.WHISPER_VAD,
         )
 
+    def test_konteks_menambahkan_hotwords_ke_transkrip(self):
+        """Konteks domain diteruskan sebagai initial_prompt DAN hotwords."""
+        model = mock.MagicMock()
+        model.transcribe.return_value = self._segmen_palsu([(0.0, 5.0, "Kemenkes")])
+        with mock.patch.object(zoom_notulen, "WhisperModel", return_value=model):
+            zoom_notulen.transkripsi_audio("a.wav", "id", konteks="Kemenkes Permenpan SJT")
+        kwargs = model.transcribe.call_args.kwargs
+        self.assertEqual(kwargs["initial_prompt"], "Kemenkes Permenpan SJT")
+        self.assertEqual(kwargs["hotwords"], "Kemenkes Permenpan SJT")
+
+    def test_tanpa_konteks_tidak_ada_hotwords(self):
+        """Tanpa konteks, hotwords tidak diteruskan ke Whisper."""
+        model = mock.MagicMock()
+        model.transcribe.return_value = self._segmen_palsu([(0.0, 5.0, "Halo")])
+        with mock.patch.object(zoom_notulen, "WhisperModel", return_value=model):
+            zoom_notulen.transkripsi_audio("a.wav", "id")
+        kwargs = model.transcribe.call_args.kwargs
+        self.assertNotIn("hotwords", kwargs)
+        self.assertNotIn("initial_prompt", kwargs)
+
     def test_bahasa_auto_memanggil_tanpa_language(self):
         """'auto' tidak boleh memaksa bahasa -> faster-whisper mendeteksi sendiri."""
         _, model = self._panggil([(0.0, 5.0, "Hello world")], "auto")
@@ -1068,6 +1246,134 @@ class TestTranskripsiGemini(unittest.TestCase):
             self.assertEqual(zoom_notulen.transkripsi_audio("a.wav", "id"), "L")
         g.assert_called_once_with("a.wav", "id", konteks=None)
         self.assertEqual(l.call_count, 2)
+
+class TestNoiseReduce(unittest.TestCase):
+    """Tes fungsi kurangi_noise."""
+
+    def test_tanpa_library_mengembalikan_none(self):
+        """Jika noisereduce belum terinstal, kembalikan None tanpa error."""
+        with mock.patch.dict(sys.modules, {"noisereduce": None}):
+            # Re-import akan gagal karena None, tapi fungsi harus menangani gracefully
+            hasil = zoom_notulen.kurangi_noise("audio.wav")
+            self.assertIsNone(hasil)
+
+    def test_file_tidak_valid_mengembalikan_none(self):
+        """File audio tidak valid -> kembalikan None tanpa crash."""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "bukan_audio.wav")
+            with open(path, "w") as f:
+                f.write("bukan audio")
+            hasil = zoom_notulen.kurangi_noise(path)
+            self.assertIsNone(hasil)
+
+
+class TestMultiPassNotulen(unittest.TestCase):
+    """Tes buat_notulen_multipass: 2-pass generation."""
+
+    def _klien_palsu(self, teks_pass1="TOPIK DISKUSI:\n1. Topik A", teks_pass2="# Notulen Rapat"):
+        """Klien Gemini palsu yang mengembalikan teks berbeda untuk tiap panggilan."""
+        client = mock.MagicMock()
+        resp1 = mock.MagicMock(text=teks_pass1)
+        resp2 = mock.MagicMock(text=teks_pass2)
+        client.models.generate_content.side_effect = [resp1, resp2]
+        return client
+
+    def test_multipass_memanggil_gemini_dua_kali(self):
+        """Multi-pass harus memanggil generate_content 2 kali (fakta lalu notulen)."""
+        client = self._klien_palsu()
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client):
+            hasil = zoom_notulen.buat_notulen_multipass("transkrip")
+        self.assertEqual(client.models.generate_content.call_count, 2)
+        self.assertEqual(hasil, "# Notulen Rapat")
+
+    def test_multipass_pass1_kosong_fallback_ke_single(self):
+        """Jika Pass 1 kosong, fallback ke buat_notulen single-pass."""
+        client = mock.MagicMock()
+        # Pass 1 kosong
+        resp_kosong = mock.MagicMock(text="   ")
+        client.models.generate_content.return_value = resp_kosong
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client):
+            with mock.patch.object(
+                zoom_notulen, "buat_notulen", return_value="# Fallback"
+            ) as fallback:
+                hasil = zoom_notulen.buat_notulen_multipass("transkrip")
+        fallback.assert_called_once()
+        self.assertEqual(hasil, "# Fallback")
+
+    def test_multipass_prompt_pass1_anti_halusinasi(self):
+        """Pass 1 (ekstraksi fakta) harus memuat aturan anti-halusinasi."""
+        client = self._klien_palsu()
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client):
+            zoom_notulen.buat_notulen_multipass("transkrip")
+        # Pass 1 = panggilan pertama
+        prompt1 = client.models.generate_content.call_args_list[0].kwargs["contents"]
+        self.assertIn("JANGAN mengarang fakta", prompt1)
+        self.assertIn("BENAR-BENAR tertulis di transkrip", prompt1)
+
+
+class TestDispatcherNotulenMode(unittest.TestCase):
+    """Tes _buat_notulen_sesuai_mode: dispatch ke single atau multi-pass."""
+
+    def test_mode_multi_memanggil_multipass(self):
+        cfg = {"notulen_mode": "multi", "judul": None, "model": "m"}
+        with mock.patch.object(
+            zoom_notulen, "buat_notulen_multipass", return_value="Multi"
+        ) as mp:
+            hasil = zoom_notulen._buat_notulen_sesuai_mode(cfg, "t", None)
+        mp.assert_called_once()
+        self.assertEqual(hasil, "Multi")
+
+    def test_mode_single_memanggil_buat_notulen(self):
+        cfg = {"notulen_mode": "single", "judul": None, "model": "m"}
+        with mock.patch.object(
+            zoom_notulen, "buat_notulen", return_value="Single"
+        ) as sp:
+            hasil = zoom_notulen._buat_notulen_sesuai_mode(cfg, "t", None)
+        sp.assert_called_once()
+        self.assertEqual(hasil, "Single")
+
+
+class TestKonfigurasiBaru(unittest.TestCase):
+    """Tes field konfigurasi baru: noise_reduce, notulen_mode."""
+
+    def test_default_noise_reduce_false(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {})
+        self.assertEqual(cfg["noise_reduce"], False)
+
+    def test_default_notulen_mode_multi(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {})
+        self.assertEqual(cfg["notulen_mode"], "multi")
+
+    def test_notulen_mode_dari_konfigurasi(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {"notulen_mode": "single"})
+        self.assertEqual(cfg["notulen_mode"], "single")
+
+    def test_notulen_mode_cli_menang(self):
+        args = zoom_notulen.buat_parser().parse_args(["--notulen-mode", "single"])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {"notulen_mode": "multi"})
+        self.assertEqual(cfg["notulen_mode"], "single")
+
+    def test_notulen_mode_invalid_ditolak(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        with self.assertRaises(SystemExit):
+            zoom_notulen.terapkan_konfigurasi(args, {"notulen_mode": "turbo"})
+
+    def test_noise_reduce_dari_konfigurasi(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {"noise_reduce": True})
+        self.assertEqual(cfg["noise_reduce"], True)
+
+    def test_noise_reduce_cli_flag(self):
+        args = zoom_notulen.buat_parser().parse_args(["--noise-reduce"])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {})
+        self.assertEqual(cfg["noise_reduce"], True)
+
+    def test_parser_notulen_mode_invalid_ditolak(self):
+        with self.assertRaises(SystemExit):
+            zoom_notulen.buat_parser().parse_args(["--notulen-mode", "turbo"])
 
 
 if __name__ == "__main__":

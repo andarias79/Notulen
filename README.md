@@ -23,6 +23,7 @@ Rekam audio  →  Transkripsi (faster-whisper lokal / Gemini cloud)  →  Notule
 
 ## ✨ Fitur
 
+- 🎥 **YouTube langsung**: download audio dari URL YouTube dengan `--youtube <url>` — otomatis diunduh, dikonversi, ditranskripsi, dan dibuat notulen.
 - 🎙️ **Dua sumber perekaman**: mikrofon (`mic`) atau **audio sistem langsung dari Windows** via WASAPI loopback (`loopback`) — menangkap suara *semua* peserta rapat Zoom tanpa fitur rekam bawaan.
 - ⏹️ **Hentikan rekaman kapan saja**: tekan **`q`** (atau **Ctrl+C**) saat merekam — rekaman berhenti, audio yang sudah terekam **tetap disimpan** lalu langsung diproses ke transkripsi & notulen. Jika dihentikan sangat cepat (< 2 detik), muncul peringatan "rekaman sangat pendek".
 - 📄 **Transkripsi bahasa Indonesia** (atau bahasa lain) dengan dua mesin: **faster-whisper lokal** (CTranslate2 + INT8 + VAD, **±4× lebih cepat** dari OpenAI Whisper di CPU) atau **transkripsi cloud Gemini** (`--engine gemini` — super cepat, verbatim, ber-timestamp **+ speaker diarization**).
@@ -35,6 +36,8 @@ Rekam audio  →  Transkripsi (faster-whisper lokal / Gemini cloud)  →  Notule
 - 🛡️ **API key aman** — disimpan di `.env`, bukan di source code.
 - 📧 **Kirim notulen via email** ke peserta (opsional, via Resend API — gratis 100 email/hari).
 - 🔁 **Proses file audio yang sudah ada** (mis. hasil rekaman Zoom yang diekstrak) tanpa perlu merekam ulang.
+- 🎬 **Dukungan video langsung**: proses file video (MP4, MKV, AVI, MOV, dll.) — audio diekstrak otomatis lalu ditranskripsi.
+- 📁 **Batch proses folder**: `--folder <path>` memproses semua file audio/video di folder secara otomatis.
 
 ---
 
@@ -96,6 +99,11 @@ pip install -r requirements.txt
 ```
 
 > `pyaudiowpatch` (untuk loopback) otomatis hanya terinstal di Windows (ditandai `sys_platform == "win32"` di `requirements.txt`).
+> 
+> **Untuk fitur YouTube** (`--youtube`): `yt-dlp` sudah termasuk di `requirements.txt`. Jika ingin update manual:
+> ```bash
+> pip install -U yt-dlp
+> ```
 
 ### 4. Konfigurasi API key
 
@@ -207,6 +215,21 @@ python zoom_notulen.py --list-devices
 # Proses file audio yang sudah ada (mis. hasil rekaman Zoom)
 python zoom_notulen.py --audio rekaman_zoom.wav
 
+# Download & proses audio dari YouTube langsung
+python zoom_notulen.py --youtube "https://www.youtube.com/watch?v=VIDEO_ID"
+
+# YouTube + transkripsi cloud Gemini (super cepat)
+python zoom_notulen.py --youtube "https://www.youtube.com/watch?v=VIDEO_ID" --engine gemini
+
+# Proses file video langsung (audio diekstrak otomatis)
+python zoom_notulen.py --audio rapat_zoom.mp4
+
+# Batch proses semua file audio/video di folder
+python zoom_notulen.py --folder ./rekaman_rapat/
+
+# Batch proses dengan transkripsi cloud Gemini
+python zoom_notulen.py --folder ./rekaman_rapat/ --engine gemini
+
 # SUPER CEPAT: transkripsi cloud via Gemini (verbatim + timestamp + pembicara)
 python zoom_notulen.py --audio rekaman_zoom.wav --engine gemini
 
@@ -230,6 +253,8 @@ python zoom_notulen.py --durasi 3600 --tujuan-email "budi@mail.com, siti@mail.co
 |---|---|---|
 | `--durasi <detik>` | `60` | Durasi perekaman dalam detik — **tanpa batas maksimum** (mis. `7200` = 2 jam, `10800` = 3 jam). Jika > 1 jam, skrip menampilkan info otomatis (ukuran file & RAM transkripsi) sebelum merekam. **Selama merekam, tekan `q` (atau Ctrl+C) untuk berhenti lebih awal** — audio tersimpan & tetap diproses |
 | `--audio <path>` | — | Transkripsi file audio yang sudah ada (lewati perekaman) |
+| `--youtube <url>` | — | URL YouTube untuk diunduh dan diproses langsung (butuh `yt-dlp`, lihat instalasi) |
+| `--folder <path>` | — | Folder berisi file audio/video untuk diproses secara batch (semua file didukung) |
 | `--sumber {mic, loopback}` | `mic` | Sumber audio: mikrofon atau audio sistem WASAPI |
 | `--list-devices` | off | Tampilkan perangkat WASAPI loopback lalu keluar |
 | `--perangkat <index>` | otomatis | Paksa pakai perangkat loopback tertentu |

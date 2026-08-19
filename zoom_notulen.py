@@ -73,9 +73,10 @@ if not GEMINI_API_KEY:
         "  2. Isi GEMINI_API_KEY dengan API key Anda (aistudio.google.com/apikey)\n"
     )
 
-# Model tier gratis (Flash-Lite) - kuota harian paling besar. Ganti ke 'gemini-flash-latest'
-# untuk kualitas lebih tinggi, atau --model <nama> untuk memilih model lain.
-GEMINI_MODEL = "gemini-flash-lite-latest"
+# Model Flash untuk pembuatan notulen: kualitas reasoning bagus untuk ringkasan
+# dan action items. Flash-Lite jadi cadangan jika kuota Flash habis.
+GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_NOTULEN_CADANGAN = ["gemini-flash-lite-latest", "gemini-flash-latest"]
 GEMINI_PERCOBAAN_ULANG = 4  # percobaan ulang otomatis untuk error sementara (503/429)
 GEMINI_JEDA_AWAL = 5        # jeda awal (detik) sebelum coba ulang, meningkat eksponensial
 # Mode transkripsi cloud (--engine gemini): audio diunggah ke File API Google lalu
@@ -93,10 +94,10 @@ GEMINI_KOMPRES_FLAC_MIN_MB = 20      # WAV > 20 MB dikompres ke FLAC sementara s
 GEMINI_TUNGGU_FILE_DETIK = 600       # waktu tunggu maksimal file diproses di server Gemini (detik)
 # faster-whisper: engine CTranslate2 + kuantisasi INT8 -> hingga ±4x lebih cepat
 # daripada openai-whisper di CPU dengan akurasi setara, plus VAD silero untuk
-# melewati bagian sunyi. 'base'/'tiny' lebih cepat; 'medium'/'large-v3' lebih akurat.
-# 'medium' dipilih sebagai default karena akurasi bahasa Indonesia jauh lebih baik
-# dibanding 'small', terutama untuk istilah teknis/resmi (trade-off: ~2x lebih lambat).
-WHISPER_MODEL = "medium"
+# melewati bagian sunyi. 'large-v3-turbo' (alias 'turbo') memberikan akurasi
+# setara large-v3 tapi 3-4x lebih cepat (809M vs 1.55B parameter).
+# Download pertama ~3.1 GB, setelahnya di-cache.
+WHISPER_MODEL = "large-v3-turbo"
 WHISPER_BEAM_SIZE = 5   # beam search; 4-8 = sweet-spot kecepatan/akurasi di CTranslate2
 WHISPER_VAD = True      # lewati bagian sunyi (silero VAD) -> lebih cepat & hasil lebih rapi
 SAMPLE_RATE = 16000     # 16 kHz mono = standar Whisper -> file 4x lebih kecil dari 44.1 kHz stereo
@@ -115,6 +116,7 @@ KONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "konfigur
 PILIHAN_SUMBER = ("mic", "loopback")
 PILIHAN_FORMAT = ("md", "txt", "both")
 PILIHAN_ENGINE = ("lokal", "gemini")  # 'lokal' = faster-whisper (offline), 'gemini' = transkripsi cloud
+PILIHAN_NOTULEN_MODE = ("single", "multi")  # 'single' = 1-pass langsung, 'multi' = 2-pass (fakta lalu notulen)
 
 
 def muat_konfigurasi(path=KONFIG_PATH):
@@ -142,6 +144,8 @@ def terapkan_konfigurasi(args, konfig):
         "daftar_peserta": None,
         "tujuan_email": None,
         "konteks": None,
+        "noise_reduce": False,
+        "notulen_mode": "multi",
     }
 
     # 1. Dari file konfigurasi
@@ -163,6 +167,10 @@ def terapkan_konfigurasi(args, konfig):
     if hasil["engine"] not in PILIHAN_ENGINE:
         raise SystemExit(
             f"\nERROR: 'engine' di konfigurasi.json harus salah satu dari {PILIHAN_ENGINE}."
+        )
+    if hasil["notulen_mode"] not in PILIHAN_NOTULEN_MODE:
+        raise SystemExit(
+            f"\nERROR: 'notulen_mode' di konfigurasi.json harus salah satu dari {PILIHAN_NOTULEN_MODE}."
         )
 
     # 2. Argumen CLI menang jika diisi eksplisit
@@ -514,6 +522,387 @@ def _resample_ke_16khz(nama_file, rate_asli, kanal_asli):
 
 
 # ==========================================
+# 3b. FUNGSI PENGURANGAN NOISE (OPSIONAL)
+# ==========================================
+def kurangi_noise(nama_file):
+    """Mengurangi noise latar (AC, keyboard, latar belakang) dari file audio.
+
+    Menggunakan library noisereduce untuk spectral gating. Memproses audio
+    per chunk (30 detik) agar hemat RAM untuk file besar.
+    Mengembalikan path file WAV bersih (temp), atau None jika gagal/library tidak ada.
+    """
+    try:
+        import noisereduce as nr
+        import soundfile as sf
+    except ImportError:
+        print(
+            "-> Peringatan: library 'noisereduce' belum terinstal. Lewati noise reduction.\n"
+            "   Instal dengan: pip install noisereduce"
+        )
+        return None
+
+    print("-> Mengurangi noise latar belakang audio...")
+    try:
+        info = sf.info(nama_file)
+        rate = info.samplerate
+        channels = info.channels
+        CHUNK_DETIK = 30  # proses per 30 detik agar hemat RAM
+        chunk_frames = int(CHUNK_DETIK * rate)
+
+        fd, jalur = tempfile.mkstemp(suffix="_clean.wav")
+        os.close(fd)
+
+        with sf.SoundFile(nama_file, "r") as src:
+            with sf.SoundFile(
+                jalur, "w", samplerate=rate, channels=channels,
+                format="WAV", subtype="PCM_16"
+            ) as dst:
+                while True:
+                    data = src.read(chunk_frames, dtype="float32")
+                    if len(data) == 0:
+                        break
+                    # Mono atau multi-channel: noisereduce menangani keduanya
+                    if len(data.shape) > 1 and data.shape[1] > 1:
+                        # Proses per kanal lalu gabung kembali
+                        import numpy as np
+                        cleaned = np.column_stack([
+                            nr.reduce_noise(y=data[:, ch], sr=rate, prop_decrease=0.7)
+                            for ch in range(data.shape[1])
+                        ])
+                    else:
+                        cleaned = nr.reduce_noise(y=data, sr=rate, prop_decrease=0.7)
+                    dst.write(cleaned)
+        print(f"-> Noise reduction selesai: {jalur}")
+        return jalur
+    except Exception as e:
+        print(f"-> Peringatan: gagal mengurangi noise ({e}). Menggunakan audio asli.")
+        return None
+
+
+# ==========================================
+# 3c. FUNGSI DOWNLOAD AUDIO DARI YOUTUBE
+# ==========================================
+def unduh_audio_youtube(url, nama_file=None):
+    """Mengunduh audio dari URL YouTube dan mengonversi ke WAV.
+
+    Menggunakan yt-dlp untuk download + konversi otomatis ke WAV 16kHz mono.
+    Mengembalikan path file WAV yang diunduh, atau None jika gagal.
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        raise SystemExit(
+            "\nyt-dlp belum terinstal. Instal dengan:\n"
+            "  pip install yt-dlp\n"
+            "(Library untuk download audio/video dari YouTube dan situs lain.)"
+        ) from None
+
+    print(f"\n-> Mengunduh audio dari YouTube...")
+    print(f"   URL: {url}")
+
+    if nama_file is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        DIR_REKAMAN = "Hasil_Rekaman"
+        os.makedirs(DIR_REKAMAN, exist_ok=True)
+        nama_file = os.path.join(DIR_REKAMAN, f"youtube_{timestamp}.wav")
+
+    # Opsi yt-dlp: download audio, konversi ke WAV, sample rate 16kHz, mono
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": nama_file.replace(".wav", ".%(ext)s"),
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "wav",
+            "preferredquality": "192",
+        }],
+        "postprocessor_args": [
+            "-ar", "16000",  # sample rate 16 kHz (standar Whisper)
+            "-ac", "1",     # mono
+        ],
+        "quiet": False,
+        "no_warnings": False,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            judul = info.get("title", "YouTube Audio")
+            durasi = info.get("duration", 0)
+            print(f"   Judul: {judul}")
+            if durasi:
+                print(f"   Durasi: {_format_durasi(durasi)}")
+    except yt_dlp.utils.DownloadError as e:
+        print(f"\n-> Gagal mengunduh dari YouTube: {e}")
+        print("   Pastikan URL valid dan yt-dlp ter-update (pip install -U yt-dlp).")
+        return None
+    except Exception as e:
+        print(f"\n-> Gagal mengunduh dari YouTube: {e}")
+        return None
+
+    # yt-dlp mungkin menghasilkan file dengan nama sedikit berbeda
+    # Cari file WAV yang dihasilkan
+    if not os.path.isfile(nama_file):
+        # Coba cari file dengan ekstensi lain yang mungkin dihasilkan
+        base = nama_file.replace(".wav", "")
+        for ext in [".wav", ".webm", ".m4a", ".mp3"]:
+            kandidat = base + ext
+            if os.path.isfile(kandidat):
+                if ext != ".wav":
+                    # Konversi ke WAV jika perlu
+                    print(f"-> Mengonversi {ext} ke WAV...")
+                    try:
+                        import subprocess
+                        subprocess.run(
+                            ["ffmpeg", "-y", "-i", kandidat, "-ar", "16000", "-ac", "1", nama_file],
+                            check=True,
+                            capture_output=True,
+                        )
+                        os.remove(kandidat)
+                    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                        print(f"-> Gagal konversi ke WAV: {e}")
+                        # Jika ffmpeg tidak ada, coba pakai file asli
+                        if ext in (".m4a", ".mp3"):
+                            return kandidat
+                        return None
+                break
+        else:
+            print("-> File audio tidak ditemukan setelah download.")
+            return None
+
+    print(f"-> Audio tersimpan: {nama_file}")
+    return nama_file
+
+
+# ==========================================
+# 3d. FUNGSI EKSTRAKSI AUDIO DARI VIDEO
+# ==========================================
+# Format video yang didukung
+FORMAT_VIDEO = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv", ".m4v")
+# Format audio yang didukung
+FORMAT_AUDIO = (".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".wma")
+
+
+def ekstrak_audio_dari_video(jalur_video, jalur_output=None):
+    """Mengekstrak audio dari file video dan mengonversi ke WAV 16kHz mono.
+
+    Menggunakan ffmpeg (via subprocess atau yt-dlp untuk konversi).
+    Mengembalikan path file WAV, atau None jika gagal.
+    """
+    import subprocess
+
+    if jalur_output is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        DIR_REKAMAN = "Hasil_Rekaman"
+        os.makedirs(DIR_REKAMAN, exist_ok=True)
+        nama_base = os.path.splitext(os.path.basename(jalur_video))[0]
+        jalur_output = os.path.join(DIR_REKAMAN, f"{nama_base}_{timestamp}.wav")
+
+    print(f"-> Mengekstrak audio dari video: {os.path.basename(jalur_video)}")
+
+    # Coba ffmpeg langsung
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", jalur_video,
+                "-vn",                  # skip video
+                "-ar", "16000",          # sample rate 16 kHz
+                "-ac", "1",              # mono
+                "-acodec", "pcm_s16le",  # WAV PCM 16-bit
+                jalur_output
+            ],
+            check=True,
+            capture_output=True,
+        )
+        print(f"-> Audio terekstrak: {jalur_output}")
+        return jalur_output
+    except FileNotFoundError:
+        print("-> ffmpeg tidak ditemukan. Mencoba via yt-dlp...")
+    except subprocess.CalledProcessError as e:
+        print(f"-> ffmpeg gagal: {e.stderr.decode('utf-8', errors='ignore')[:200]}")
+        return None
+
+    # Fallback: gunakan yt-dlp untuk ekstrak audio dari video
+    try:
+        import yt_dlp
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": jalur_output.replace(".wav", ".%(ext)s"),
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "wav",
+                "preferredquality": "192",
+            }],
+            "postprocessor_args": ["-ar", "16000", "-ac", "1"],
+            "quiet": True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([jalur_video])
+        if os.path.isfile(jalur_output):
+            print(f"-> Audio terekstrak (via yt-dlp): {jalur_output}")
+            return jalur_output
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"-> yt-dlp gagal: {e}")
+
+    print("-> Gagal mengekstrak audio. Pastikan ffmpeg terinstal atau file video valid.")
+    return None
+
+
+def adalah_file_audio_video(jalur):
+    """Mengecek apakah file adalah audio/video yang didukung."""
+    ext = os.path.splitext(jalur)[1].lower()
+    return ext in (FORMAT_VIDEO + FORMAT_AUDIO)
+
+
+def _cetak_progress_batch(saat_ini, total, nama_file, bar_lebar=30):
+    """Mencetak progress bar untuk batch processing."""
+    persen = min(saat_ini / total, 1.0) if total > 0 else 0
+    terisi = int(bar_lebar * persen)
+    bar = "#" * terisi + "-" * (bar_lebar - terisi)
+    # Potong nama file jika terlalu panjang
+    nama_pendek = nama_file if len(nama_file) <= 30 else nama_file[:27] + "..."
+    print(f"\r      [{bar}] {saat_ini}/{total} ({persen:.0%}) {nama_pendek:<33}", end="", flush=True)
+
+
+def proses_folder(jalur_folder, cfg, engine="lokal", bahasa="id"):
+    """Memproses semua file audio/video di folder secara batch.
+
+    Mengembalikan list tuple (nama_file, transkrip_teks, notulen_teks) untuk setiap file.
+    """
+    if not os.path.isdir(jalur_folder):
+        raise SystemExit(f"\nERROR: folder tidak ditemukan: {jalur_folder}")
+
+    # Cari semua file audio/video di folder
+    files = []
+    for f in sorted(os.listdir(jalur_folder)):
+        jalur = os.path.join(jalur_folder, f)
+        if os.path.isfile(jalur) and adalah_file_audio_video(jalur):
+            files.append(jalur)
+
+    if not files:
+        raise SystemExit(
+            f"\nERROR: tidak ditemukan file audio/video di folder: {jalur_folder}\n"
+            f"   Format yang didukung: {', '.join(FORMAT_VIDEO + FORMAT_AUDIO)}"
+        )
+
+    total_file = len(files)
+    print(f"\n{'='*60}")
+    print(f"  BATCH PROCESSING: {total_file} file ditemukan")
+    print(f"  Folder: {jalur_folder}")
+    print(f"  Engine: {engine} | Bahasa: {bahasa}")
+    print(f"{'='*60}")
+    print("\nDaftar file:")
+    for i, f in enumerate(files, 1):
+        ukuran = os.path.getsize(f) / 1024  # KB
+        print(f"  {i:2d}. {os.path.basename(f):<40} ({ukuran:.0f} KB)")
+    print()
+
+    hasil = []
+    DIR_NOTULEN = "Hasil_Notulen"
+    DIR_TRANSKRIP = "Hasil_Transkripsi"
+    os.makedirs(DIR_NOTULEN, exist_ok=True)
+    os.makedirs(DIR_TRANSKRIP, exist_ok=True)
+
+    # Statistik
+    sukses = 0
+    dilewati = 0
+    gagal = 0
+
+    for i, jalur_file in enumerate(files, 1):
+        nama_file = os.path.basename(jalur_file)
+        print(f"\n{'='*60}")
+        _cetak_progress_batch(i, total_file, nama_file)
+        print()  # newline setelah progress bar
+        print(f"  File {i}/{total_file}: {nama_file}")
+        print(f"{'='*60}")
+
+        # Ekstrak audio dari video jika perlu
+        ext = os.path.splitext(jalur_file)[1].lower()
+        if ext in FORMAT_VIDEO:
+            print("  -> Mengekstrak audio dari video...")
+            audio_file = ekstrak_audio_dari_video(jalur_file)
+            if not audio_file:
+                print(f"  -> SKIP: gagal mengekstrak audio dari {nama_file}")
+                dilewati += 1
+                continue
+        else:
+            audio_file = jalur_file
+
+        # Deteksi sunyi
+        rms = ukur_rms(audio_file)
+        if rms is not None and rms < AMBANG_RMS_SENYAP:
+            print(f"  -> SKIP: file hampir sunyi (RMS: {rms:.4f})")
+            if ext in FORMAT_VIDEO and audio_file != jalur_file:
+                _hapus_file(audio_file)
+            dilewati += 1
+            continue
+
+        # Transkripsi
+        print("  -> Transkripsi...")
+        try:
+            transkrip_teks = transkripsi_audio(audio_file, bahasa, engine,
+                                               konteks=cfg.get("konteks"))
+        except Exception as e:
+            print(f"  -> SKIP: transkripsi gagal ({e})")
+            if ext in FORMAT_VIDEO and audio_file != jalur_file:
+                _hapus_file(audio_file)
+            gagal += 1
+            continue
+
+        if not transkrip_teks or not transkrip_teks.strip():
+            print("  -> SKIP: transkripsi kosong")
+            if ext in FORMAT_VIDEO and audio_file != jalur_file:
+                _hapus_file(audio_file)
+            dilewati += 1
+            continue
+
+        # Simpan transkrip
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        nama_tanpa_ext = os.path.splitext(nama_file)[0]
+        nama_transkrip = os.path.join(DIR_TRANSKRIP, f"Transkrip_{nama_tanpa_ext}_{timestamp}.txt")
+        simpan_transkrip(transkrip_teks, nama_transkrip)
+        print(f"  -> Transkrip tersimpan: {os.path.basename(nama_transkrip)}")
+
+        # Buat notulen
+        print("  -> Membuat notulen...")
+        try:
+            info_rapat = {
+                "tanggal": datetime.now().strftime("%d %B %Y"),
+                "waktu": datetime.now().strftime("%H:%M WIB"),
+            }
+            notulen = _buat_notulen_sesuai_mode(
+                cfg, transkrip_teks, cfg.get("daftar_peserta"), info_rapat=info_rapat
+            )
+            nama_notulen = os.path.join(DIR_NOTULEN, f"Notulen_{nama_tanpa_ext}_{timestamp}")
+            simpan_notulen(notulen, nama_notulen, cfg.get("format", "both"))
+            hasil.append((nama_file, transkrip_teks, notulen))
+            sukses += 1
+            print(f"  -> Berhasil: {nama_file}")
+        except Exception as e:
+            print(f"  -> Gagal buat notulen: {e}")
+            hasil.append((nama_file, transkrip_teks, None))
+            gagal += 1
+
+        # Hapus file audio sementara jika dari video
+        if ext in FORMAT_VIDEO and audio_file != jalur_file:
+            _hapus_file(audio_file)
+
+    # Ringkasan akhir
+    print(f"\n{'='*60}")
+    print(f"  RINGKASAN BATCH PROCESSING")
+    print(f"{'='*60}")
+    print(f"  Total file   : {total_file}")
+    print(f"  Berhasil     : {sukses} [OK]")
+    print(f"  Dilewati     : {dilewati} [SKIP] (sunyi/tidak ada audio)")
+    print(f"  Gagal        : {gagal} [FAIL]")
+    print(f"  Output       : {DIR_NOTULEN}/, {DIR_TRANSKRIP}/")
+    print(f"{'='*60}")
+
+    return hasil
+
+
+# ==========================================
 # 4. FUNGSI TRANSKRIPSI (LOKAL & CLOUD)
 # ==========================================
 def ukur_rms(nama_file):
@@ -597,6 +986,9 @@ def transkripsi_audio_lokal(nama_file, bahasa, konteks=None):
         # (mis. singkatan, nama organisasi, jargon) lebih akurat dikenali.
         if konteks:
             opsi_transkrip["initial_prompt"] = konteks
+            # hot-words: meningkatkan probabilitas kata-kata tertentu di Whisper
+            # (space-separated). Sangat membantu untuk istilah teknis yang jarang.
+            opsi_transkrip["hotwords"] = konteks
         segmen, info = model.transcribe(nama_file, **opsi_transkrip)
         segmen = list(segmen)  # generator lazy -> jalankan seluruh inferensi
     except Exception as e:
@@ -1032,10 +1424,152 @@ TRANSKRIP:
                 "benar-benar muncul di transkrip dan jelas bertanggung jawab."
             )
         ),
+        model_cadangan=GEMINI_NOTULEN_CADANGAN,
     )
     if not response.text or not response.text.strip():
         raise SystemExit("\nGemini mengembalikan notulen kosong. Silakan coba lagi.")
     return response.text
+
+
+def buat_notulen_multipass(teks_transkrip, judul=None, daftar_peserta=None,
+                           model=GEMINI_MODEL, info_rapat=None):
+    """Membuat notulen rapat 2-tahap (multi-pass) untuk mengurangi halusinasi.
+
+    Pass 1 - Ekstraksi Fakta: Gemini mengekstrak fakta terstruktur (topik, keputusan,
+             action items, angka kunci) dari transkrip sebagai teks terstruktur.
+    Pass 2 - Penulisan Notulen: Dari fakta terstruktur, susun notulen Markdown rapi.
+
+    Keuntungan: setiap fakta bisa di-trace ke transkrip, mengurangi halusinasi nama/angka.
+    info_rapat: dict opsional berisi 'tanggal', 'waktu', 'durasi' untuk metadata notulen.
+    """
+    print(f"\n[3/3] Memproses notulen rapat dengan Gemini AI ({model}) — mode multi-pass...")
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    # ── Pass 1: Ekstraksi Fakta Terstruktur ──
+    print("      Pass 1/2: Mengekstrak fakta dari transkrip...")
+    prompt_fakta = f"""Anda adalah analis rapat yang teliti. Dari transkrip berikut, ekstrak SEMUA fakta penting secara terstruktur. JANGAN mengarang fakta yang tidak ada di transkrip.
+
+ATURAN KETAT:
+- Hanya gunakan nama pembicara yang BENAR-BENAR tertulis di transkrip (mis. 'Pembicara 1', 'Pembicara 2', atau nama asli jika disebut).
+- JANGAN menebak atau menciptakan nama orang. Jika tidak disebutkan, tulis 'Pembicara N'.
+- Pertahankan SEMUA angka, persentase, target, realisasi persis seperti di transkrip.
+
+Format output (teks terstruktur):
+
+TOPIK DISKUSI:
+1. [topik] — [ringkasan singkat, sertakan angka kunci]
+2. ...
+
+KEPUTUSAN:
+1. [keputusan yang diambil]
+2. ...
+
+ACTION ITEMS:
+1. PIC: [nama PERSIS dari transkrip] | Tugas: [deskripsi] | Tenggat: [jika disebutkan, atau '-']
+2. ...
+
+ANGKA KUNCI:
+- [deskripsi]: [angka/persentase dari transkrip]
+
+NAMA PEMBICARA YANG TERIDENTIFIKASI:
+- [daftar nama/label pembicara yang muncul di transkrip]
+
+TRANSKRIP:
+{teks_transkrip}
+"""
+
+    resp_fakta = _panggil_generate_dengan_retry(
+        client,
+        model,
+        contents=prompt_fakta,
+        config=types.GenerateContentConfig(
+            temperature=0.1,  # sangat rendah: ekstraksi fakta harus presisi
+            system_instruction=(
+                "Anda adalah analis rapat yang sangat teliti. Tugas Anda HANYA mengekstrak "
+                "fakta yang ada di transkrip. JANGAN PERNAH menambah, menebak, atau "
+                "menciptakan informasi yang tidak ada di transkrip."
+            )
+        ),
+        model_cadangan=GEMINI_NOTULEN_CADANGAN,
+    )
+    if not resp_fakta.text or not resp_fakta.text.strip():
+        print("-> Pass 1 gagal (kosong). Fallback ke mode single-pass...")
+        return buat_notulen(teks_transkrip, judul, daftar_peserta, model, info_rapat)
+
+    fakta = resp_fakta.text
+    print(f"      Pass 1 selesai: {len(fakta)} karakter fakta diekstrak.")
+
+    # ── Pass 2: Susun Notulen Dari Fakta ──
+    print("      Pass 2/2: Menyusun notulen dari fakta terstruktur...")
+    if judul:
+        instruksi_judul = f'- Judul yang WAJIB dipakai: "# Notulen Rapat - {judul}"'
+    else:
+        instruksi_judul = '- Judul: "# Notulen Rapat - <judul/topik rapat>" (tentukan topik dari fakta)'
+
+    if daftar_peserta:
+        instruksi_peserta = (
+            f'- "## Daftar Peserta" (bullet list, hanya nama-nama ini): {daftar_peserta}\n'
+            '- Daftar Peserta hanya untuk referensi - JANGAN berasumsi siapa berbicara dari daftar ini\n'
+        )
+    else:
+        instruksi_peserta = ""
+
+    instruksi_metadata = ""
+    if info_rapat:
+        meta_parts = []
+        if info_rapat.get("tanggal"):
+            meta_parts.append(f"Tanggal: {info_rapat['tanggal']}")
+        if info_rapat.get("waktu"):
+            meta_parts.append(f"Waktu: {info_rapat['waktu']}")
+        if info_rapat.get("durasi"):
+            meta_parts.append(f"Durasi: {info_rapat['durasi']}")
+        if meta_parts:
+            instruksi_metadata = (
+                '- "## Informasi Rapat" (sebelum Ringkasan Eksekutif, berisi: '
+                + ", ".join(meta_parts) + ")\n"
+            )
+
+    prompt_notulen = f"""Susun notulen rapat yang rapi dan terstruktur berdasarkan FAKTA TERSTRUKTUR berikut.
+
+PENTING: Fakta di bawah sudah diekstrak dari transkrip asli. Gunakan HANYA fakta ini — JANGAN menambah informasi baru.
+
+Tulis hasilnya dalam format MARKDOWN dengan heading rapi, dengan struktur berikut:
+{instruksi_judul}
+{instruksi_peserta}{instruksi_metadata}- "## Ringkasan Eksekutif" (2-3 kalimat, sertakan angka kunci jika ada)
+- "## Poin-Poin Utama Diskusi" (pakai bullet list, PERTAHANKAN angka-angka kunci)
+- "## Keputusan yang Diambil" (pakai nomor atau bullet)
+- "## Action Items / Tindak Lanjut" (pakai tabel Markdown: No | PIC | Tindak Lanjut | Tenggat Waktu)
+
+ATURAN WAJIB (ANTI-HALUSINASI):
+- Gunakan HANYA nama pembicara/PIC yang ada di FAKTA TERSTRUKTUR.
+- JANGAN menambahkan nama orang yang tidak ada di fakta.
+- JANGAN membuat angka, keputusan, atau penugasan baru.
+
+FAKTA TERSTRUKTUR:
+{fakta}
+"""
+
+    resp_notulen = _panggil_generate_dengan_retry(
+        client,
+        model,
+        contents=prompt_notulen,
+        config=types.GenerateContentConfig(
+            temperature=GEMINI_TEMPERATURE,
+            system_instruction=(
+                "Anda adalah seorang sekretaris profesional yang bertugas menyusun "
+                "notulen rapat dari fakta yang sudah diekstrak.\n"
+                "ATURAN WAJIB: JANGAN PERNAH menciptakan nama pembicara atau fakta baru. "
+                "Gunakan HANYA informasi dari FAKTA TERSTRUKTUR yang diberikan."
+            )
+        ),
+        model_cadangan=GEMINI_NOTULEN_CADANGAN,
+    )
+    if not resp_notulen.text or not resp_notulen.text.strip():
+        print("-> Pass 2 gagal (kosong). Fallback ke mode single-pass...")
+        return buat_notulen(teks_transkrip, judul, daftar_peserta, model, info_rapat)
+
+    print("      Multi-pass selesai.")
+    return resp_notulen.text
 
 
 POLA_HEADING_MD = re.compile(r"^#{1,6}\s+.*$", re.MULTILINE)
@@ -1293,6 +1827,18 @@ def buat_parser():
              "Jika diisi, tahap perekaman dilewati."
     )
     parser.add_argument(
+        "--youtube", default=None,
+        help="URL video YouTube untuk diunduh dan diproses langsung. "
+             "Audio akan diunduh (via yt-dlp), dikonversi ke WAV, lalu ditranskripsi. "
+             "Butuh internet & yt-dlp terinstal (pip install yt-dlp)."
+    )
+    parser.add_argument(
+        "--folder", default=None,
+        help="Path ke folder berisi file audio/video untuk diproses secara batch. "
+             "Semua file audio/video di folder akan ditranskripsi & dibuatkan notulen. "
+             "Format didukung: wav, mp3, m4a, mp4, mkv, avi, dll."
+    )
+    parser.add_argument(
         "--bahasa", default=None,
         help="Bahasa untuk transkripsi (default: id, atau dari konfigurasi.json). "
              "Gunakan 'auto' agar deteksi bahasa otomatis (cocok untuk rapat campuran)."
@@ -1358,7 +1904,30 @@ def buat_parser():
         help="Lewati peringatan rekaman sunyi dan tetap proses transkripsi "
              "(untuk rekaman yang sangat pelan tapi masih ada isinya)."
     )
+    parser.add_argument(
+        "--noise-reduce", action="store_true", default=None,
+        help="Kurangi noise latar belakang (AC, keyboard, dll.) sebelum transkripsi. "
+             "Membutuhkan library noisereduce (pip install noisereduce)."
+    )
+    parser.add_argument(
+        "--notulen-mode", choices=PILIHAN_NOTULEN_MODE, default=None,
+        help="Mode pembuatan notulen: 'multi' = 2-pass (ekstrak fakta lalu susun notulen, "
+             "lebih akurat, default); 'single' = 1-pass langsung (lebih cepat)."
+    )
     return parser
+
+
+def _buat_notulen_sesuai_mode(cfg, teks_transkrip, daftar_peserta, info_rapat=None):
+    """Dispatcher: memilih mode pembuatan notulen sesuai konfigurasi."""
+    if cfg["notulen_mode"] == "multi":
+        return buat_notulen_multipass(
+            teks_transkrip, judul=cfg["judul"], daftar_peserta=daftar_peserta,
+            model=cfg["model"], info_rapat=info_rapat
+        )
+    return buat_notulen(
+        teks_transkrip, judul=cfg["judul"], daftar_peserta=daftar_peserta,
+        model=cfg["model"], info_rapat=info_rapat
+    )
 
 
 def main():
@@ -1409,9 +1978,8 @@ def main():
                 p.strip() for p in cfg["daftar_peserta"].split(",") if p.strip()
             )
 
-        notulen = buat_notulen(
-            transkrip_teks, judul=cfg["judul"], daftar_peserta=daftar_peserta,
-            model=cfg["model"]
+        notulen = _buat_notulen_sesuai_mode(
+            cfg, transkrip_teks, daftar_peserta
         )
 
         # Validasi anti-halusinasi
@@ -1436,8 +2004,19 @@ def main():
             kirim_email_resend(penerima, subjek, notulen)
         return
 
+    # ======= Mode batch: proses semua file di folder =======
+    if args.folder:
+        proses_folder(args.folder, cfg, engine=cfg["engine"], bahasa=cfg["bahasa"])
+        return
+
     # ======= Pipeline standar: rekam -> transkrip -> notulen =======
-    if args.audio:
+    # Mode YouTube: download audio dari URL lalu proses seperti file audio biasa
+    if args.youtube:
+        audio_file = unduh_audio_youtube(args.youtube)
+        if not audio_file or not os.path.isfile(audio_file):
+            raise SystemExit("\nERROR: gagal mengunduh audio dari YouTube.")
+        print(f"[0/3] Audio YouTube siap diproses: {audio_file}")
+    elif args.audio:
         audio_file = args.audio
         if not os.path.isfile(audio_file):
             raise SystemExit(f"\nERROR: file audio tidak ditemukan: {audio_file}")
@@ -1474,8 +2053,20 @@ def main():
             "  audio lalu jalankan ulang.\n"
         )
 
-    transkrip_teks = transkripsi_audio(audio_file, cfg["bahasa"], cfg["engine"],
+    # Noise reduction opsional: kurangi noise latar belakang sebelum transkripsi
+    audio_transkripsi = audio_file
+    jalur_bersih = None
+    if cfg["noise_reduce"]:
+        jalur_bersih = kurangi_noise(audio_file)
+        if jalur_bersih:
+            audio_transkripsi = jalur_bersih
+
+    transkrip_teks = transkripsi_audio(audio_transkripsi, cfg["bahasa"], cfg["engine"],
                                        konteks=cfg["konteks"])
+
+    # Hapus file noise-reduced sementara setelah transkripsi selesai
+    if jalur_bersih:
+        _hapus_file(jalur_bersih)
 
     # Simpan transkrip mentah ke file terpisah untuk dokumentasi
     nama_transkrip = os.path.join(DIR_TRANSKRIP, f"Transkrip_{timestamp}.txt")
@@ -1497,9 +2088,8 @@ def main():
         "waktu": datetime.now().strftime("%H:%M WIB"),
     }
 
-    notulen = buat_notulen(
-        transkrip_teks, judul=cfg["judul"], daftar_peserta=daftar_peserta,
-        model=cfg["model"], info_rapat=info_rapat
+    notulen = _buat_notulen_sesuai_mode(
+        cfg, transkrip_teks, daftar_peserta, info_rapat=info_rapat
     )
 
     # Validasi anti-halusinasi: nama PIC di Action Items harus ada di transkrip

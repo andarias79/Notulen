@@ -7,5 +7,7 @@
   "format": "both",
   "bahasa": "id",
   "engine": "lokal",
-  "konteks": "Kemenkes, Permenpan, P2KA, SJT, HCC, Human Care Consulting"
+  "konteks": "Kemenkes, Permenpan, P2KA, SJT, HCC, Human Care Consulting",
+  "noise_reduce": false,
+  "notulen_mode": "multi"
 }
