@@ -147,6 +147,7 @@ def terapkan_konfigurasi(args, konfig):
         "noise_reduce": False,
         "notulen_mode": "multi",
         "subtitle": "none",
+        "translate": None,
     }
 
     # 1. Dari file konfigurasi
@@ -871,6 +872,16 @@ def proses_folder(jalur_folder, cfg, engine="lokal", bahasa="id"):
             os.makedirs(DIR_SUBTITLE, exist_ok=True)
             nama_subtitle = os.path.join(DIR_SUBTITLE, f"subtitle_{nama_tanpa_ext}_{timestamp}")
             simpan_subtitle(transkrip_teks, nama_subtitle, cfg["subtitle"])
+
+        # Translate transkrip jika diminta
+        if cfg.get("translate"):
+            DIR_TRANSLATE = "Hasil_Translate"
+            os.makedirs(DIR_TRANSLATE, exist_ok=True)
+            teks_translate = translate_transkrip(
+                transkrip_teks, cfg["translate"], cfg.get("model", GEMINI_MODEL)
+            )
+            nama_translate = os.path.join(DIR_TRANSLATE, f"Transkrip_{nama_tanpa_ext}_{timestamp}")
+            simpan_translate(teks_translate, nama_translate, cfg["translate"])
 
         # Buat notulen
         print("  -> Membuat notulen...")
@@ -1954,6 +1965,99 @@ def simpan_subtitle(teks_transkrip, nama_dasar, format_subtitle):
 
 
 # ==========================================
+# 6c. FUNGSI TRANSLATE TRANKRIP VIA GEMINI
+# ==========================================
+# Bahasa yang didukung untuk translate
+BAHASA_TRANSLATE = {
+    "id": "Bahasa Indonesia",
+    "en": "English",
+    "ms": "Bahasa Melayu",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "ar": "Arabic",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "th": "Thai",
+    "vi": "Vietnamese",
+    "tr": "Turkish",
+    "auto": "auto-detect",
+}
+
+
+def translate_transkrip(teks_transkrip, bahasa_tujuan, model=GEMINI_MODEL):
+    """Menerjemahkan transkrip rapat ke bahasa tujuan via Gemini AI.
+
+    Menggunakan Gemini dengan temperature rendah untuk hasil terjemahan yang konsisten.
+    Mempertahankan format timestamp [MM:SS] dan label pembicara.
+
+    bahasa_tujuan: kode bahasa (mis. 'en', 'ja', 'id', dll.) atau nama bahasa.
+    Mengembalikan teks transkrip yang sudah diterjemahkan.
+    """
+    # Tentukan nama bahasa tujuan
+    nama_bahasa = BAHASA_TRANSLATE.get(bahasa_tujuan, bahasa_tujuan)
+
+    print(f"\n-> Menerjemahkan transkrip ke {nama_bahasa} via Gemini ({model})...")
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    prompt = f"""Anda adalah penerjemah profesional. Terjemahkan transkrip rapat berikut ke {nama_bahasa}.
+
+ATURAN WAJIB:
+1. PERTAHANKAN format timestamp [MM:SS] atau [HH:MM:SS] - JANGAN terjemahkan timestamp.
+2. PERTAHANKAN label pembicara (mis. 'Pembicara 1', 'Speaker 1') - JANGAN terjemahkan.
+3. Terjemahkan ISI PERCAKAPAN saja, bukan format/timestamp.
+4. Pertahankan istilah teknis/nama organisasi yang sudah dikenal luas.
+5. Gunakan terjemahan yang natural dan mudah dipahami di bahasa target.
+6. JANGAN menambah atau mengurangi informasi dari transkrip asli.
+7. Keluarkan HANYA baris transkrip yang sudah diterjemahkan. Tanpa penjelasan.
+
+CONTOH:
+[00:05] Pembicara 1: Selamat pagi, mari kita mulai rapat hari ini.
+->
+[00:05] Speaker 1: Good morning, let's start today's meeting.
+
+TRANSKRIP ASLI:
+{teks_transkrip}
+"""
+
+    response = _panggil_generate_dengan_retry(
+        client,
+        model,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.1,  # rendah: terjemahan harus konsisten & akurat
+            system_instruction=(
+                "Anda adalah penerjemah profesional yang sangat teliti. "
+                "Tugas Anda HANYA menerjemahkan teks percakapan dari transkrip rapat. "
+                "JANGAN PERNAH mengubah, menambah, atau menghapus timestamp atau label pembicara."
+            )
+        ),
+        model_cadangan=GEMINI_NOTULEN_CADANGAN,
+    )
+
+    if not response.text or not response.text.strip():
+        print("-> Peringatan: hasil terjemahan kosong. Menggunakan transkrip asli.")
+        return teks_transkrip
+
+    hasil = response.text.strip()
+    print(f"-> Terjemahan selesai: {len(hasil)} karakter")
+    return hasil
+
+
+def simpan_translate(teks_translate, nama_dasar, bahasa_tujuan):
+    """Menyimpan hasil translate ke file .txt."""
+    nama = f"{nama_dasar}_{bahasa_tujuan}.txt"
+    with open(nama, "w", encoding="utf-8") as f:
+        f.write(teks_translate)
+    print(f"-> Terjemahan disimpan: {nama}")
+    return nama
+
+
+# ==========================================
 # 7. FUNGSI PENGIRIMAN EMAIL (RESEND)
 # ==========================================
 POLA_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -2069,6 +2173,14 @@ def buat_parser():
         "--subtitle", choices=["srt", "vtt", "both", "none"], default=None,
         help="Buat file subtitle dari transkrip: 'srt' = SubRip (.srt), 'vtt' = WebVTT (.vtt), "
              "'both' = keduanya, 'none' = tidak buat subtitle (default)."
+    )
+    parser.add_argument(
+        "--translate", default=None,
+        metavar="BAHASA",
+        help="Terjemahkan transkrip ke bahasa lain via Gemini. "
+             "Kode bahasa: 'en' (Inggris), 'ja' (Jepang), 'ko' (Korea), 'zh' (China), "
+             "'ms' (Melayu), 'ar' (Arab), 'es' (Spanyol), 'fr' (Prancis), 'de' (Jerman), dll. "
+             "Contoh: --translate en, --translate ja"
     )
     parser.add_argument(
         "--judul", default=None,
@@ -2191,6 +2303,14 @@ def main():
             nama_subtitle = os.path.join(DIR_SUBTITLE, f"subtitle_{timestamp}")
             simpan_subtitle(transkrip_teks, nama_subtitle, cfg["subtitle"])
 
+        # Translate transkrip jika diminta
+        if cfg["translate"]:
+            DIR_TRANSLATE = "Hasil_Translate"
+            os.makedirs(DIR_TRANSLATE, exist_ok=True)
+            teks_translate = translate_transkrip(transkrip_teks, cfg["translate"], cfg["model"])
+            nama_translate = os.path.join(DIR_TRANSLATE, f"Transkrip_{timestamp}")
+            simpan_translate(teks_translate, nama_translate, cfg["translate"])
+
         # Validasi anti-halusinasi
         nama_mencurigakan = periksa_halusinasi_notulen(notulen, transkrip_teks)
         if nama_mencurigakan:
@@ -2287,6 +2407,14 @@ def main():
         os.makedirs(DIR_SUBTITLE, exist_ok=True)
         nama_subtitle = os.path.join(DIR_SUBTITLE, f"subtitle_{timestamp}")
         simpan_subtitle(transkrip_teks, nama_subtitle, cfg["subtitle"])
+
+    # Translate transkrip jika diminta
+    if cfg["translate"]:
+        DIR_TRANSLATE = "Hasil_Translate"
+        os.makedirs(DIR_TRANSLATE, exist_ok=True)
+        teks_translate = translate_transkrip(transkrip_teks, cfg["translate"], cfg["model"])
+        nama_translate = os.path.join(DIR_TRANSLATE, f"Transkrip_{timestamp}")
+        simpan_translate(teks_translate, nama_translate, cfg["translate"])
 
     print("\n--- HASIL TRANSKRIP RAW ---")
     print(transkrip_teks)

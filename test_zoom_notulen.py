@@ -1482,5 +1482,90 @@ class TestSubtitleGenerator(unittest.TestCase):
         self.assertEqual(segments[0]["start"], 5400.0)  # 1:30:00 = 5400 detik
 
 
+class TestTranslate(unittest.TestCase):
+    """Tes fungsi translate_transkrip via Gemini."""
+
+    def test_translate_argumen_diterima(self):
+        args = zoom_notulen.buat_parser().parse_args(["--translate", "en"])
+        self.assertEqual(args.translate, "en")
+
+    def test_translate_default_none(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        self.assertIsNone(args.translate)
+
+    def test_bahasa_translate_dikenali(self):
+        """Semua bahasa dalam BAHASA_TRANSLATE harus dikenali."""
+        self.assertIn("en", zoom_notulen.BAHASA_TRANSLATE)
+        self.assertIn("id", zoom_notulen.BAHASA_TRANSLATE)
+        self.assertIn("ja", zoom_notulen.BAHASA_TRANSLATE)
+        self.assertIn("ko", zoom_notulen.BAHASA_TRANSLATE)
+        self.assertIn("auto", zoom_notulen.BAHASA_TRANSLATE)
+
+    def test_translate_mengembalikan_teks(self):
+        """translate_transkrip harus mengembalikan teks terjemahan."""
+        client = mock.MagicMock()
+        resp = mock.MagicMock(text="[00:05] Hello everyone")
+        client.models.generate_content.return_value = resp
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client):
+            hasil = zoom_notulen.translate_transkrip(
+                "[00:05] Halo semuanya", "en"
+            )
+            self.assertIn("Hello", hasil)
+            # Pastikan prompt berisi instruksi untuk mempertahankan timestamp
+            prompt = client.models.generate_content.call_args.kwargs["contents"]
+            self.assertIn("timestamp", prompt.lower())
+
+    def test_translate_respon_kosong_kembali_asli(self):
+        """Jika Gemini mengembalikan kosong, transkrip asli dikembalikan."""
+        client = mock.MagicMock()
+        resp = mock.MagicMock(text="   ")  # kosong/spasi
+        client.models.generate_content.return_value = resp
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client):
+            hasil = zoom_notulen.translate_transkrip(
+                "[00:05] Halo semuanya", "en"
+            )
+            self.assertEqual(hasil, "[00:05] Halo semuanya")  # kembali asli
+
+    def test_simpan_translate(self):
+        """simpan_translate harus membuat file .txt dengan kode bahasa."""
+        with tempfile.TemporaryDirectory() as d:
+            nama = os.path.join(d, "transkrip")
+            hasil = zoom_notulen.simpan_translate("Hello world", nama, "en")
+            self.assertTrue(os.path.isfile(hasil))
+            self.assertIn("_en.txt", hasil)
+            with open(hasil, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "Hello world")
+
+    def test_translate_prompt_mempertahankan_timestamp(self):
+        """Prompt translate harus instruksikan pertahankan timestamp."""
+        client = mock.MagicMock()
+        resp = mock.MagicMock(text="[00:05] Translated text")
+        client.models.generate_content.return_value = resp
+        with mock.patch.object(zoom_notulen.genai, "Client", return_value=client):
+            zoom_notulen.translate_transkrip("[00:05] Teks asli", "ja")
+            prompt = client.models.generate_content.call_args.kwargs["contents"]
+            self.assertIn("Japanese", prompt)  # nama bahasa di prompt
+            self.assertIn("[MM:SS]", prompt)  # instruksi format timestamp
+
+
+class TestTranslateIntegration(unittest.TestCase):
+    """Tes integrasi translate ke configuration."""
+
+    def test_translate_dari_konfigurasi(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {"translate": "en"})
+        self.assertEqual(cfg["translate"], "en")
+
+    def test_translate_cli_menang(self):
+        args = zoom_notulen.buat_parser().parse_args(["--translate", "ja"])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {"translate": "en"})
+        self.assertEqual(cfg["translate"], "ja")
+
+    def test_translate_default_none(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {})
+        self.assertIsNone(cfg["translate"])
+
+
 if __name__ == "__main__":
     unittest.main()

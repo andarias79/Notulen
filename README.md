@@ -39,6 +39,7 @@ Rekam audio  →  Transkripsi (faster-whisper lokal / Gemini cloud)  →  Notule
 - 🎬 **Dukungan video langsung**: proses file video (MP4, MKV, AVI, MOV, dll.) — audio diekstrak otomatis lalu ditranskripsi.
 - 📁 **Batch proses folder**: `--folder <path>` memproses semua file audio/video di folder secara otomatis.
 - 📄 **Subtitle/Caption generator**: buat file subtitle `.srt` (SubRip) atau `.vtt` (WebVTT) dari transkrip untuk video player.
+- 🌐 **Translate transkrip**: terjemahkan transkrip ke bahasa lain via Gemini (`--translate en`, `--translate ja`, dll.). Mempertahankan format timestamp dan label pembicara.
 
 ---
 
@@ -240,6 +241,15 @@ python zoom_notulen.py --audio rekaman_zoom.wav --subtitle both
 # YouTube + subtitle untuk video
 python zoom_notulen.py --youtube "https://youtu.be/VIDEO_ID" --subtitle srt
 
+# Translate transkrip ke bahasa Inggris
+python zoom_notulen.py --audio rapat.wav --translate en
+
+# Translate transkrip ke bahasa Jepang
+python zoom_notulen.py --audio rapat.wav --translate ja
+
+# Translate + subtitle sekaligus
+python zoom_notulen.py --audio rapat.wav --translate en --subtitle srt
+
 # SUPER CEPAT: transkripsi cloud via Gemini (verbatim + timestamp + pembicara)
 python zoom_notulen.py --audio rekaman_zoom.wav --engine gemini
 
@@ -272,6 +282,7 @@ python zoom_notulen.py --durasi 3600 --tujuan-email "budi@mail.com, siti@mail.co
 | `--bahasa <kode>` | `id` | Bahasa transkripsi. Kode bahasa: `en`, `id`, `ms`, dst. **`auto`** = deteksi bahasa otomatis (cocok untuk rapat campuran Indonesia–Inggris) |
 | `--format {md, txt, both}` | `both` | Format output notulen |
 | `--subtitle {srt, vtt, both, none}` | `none` | Buat file subtitle: `srt` = SubRip (.srt), `vtt` = WebVTT (.vtt), `both` = keduanya |
+| `--translate <bahasa>` | — | Terjemahkan transkrip via Gemini: `en` (Inggris), `ja` (Jepang), `ko` (Korea), `zh` (China), `ms` (Melayu), dll. |
 | `--judul <teks>` | otomatis | Judul notulen (dipakai Gemini di heading `# Notulen Rapat - ...`). Jika kosong, Gemini menentukan topik dari transkrip |
 | `--daftar-peserta <teks>` | — | Daftar peserta rapat dipisah koma (mis. `"Budi, Siti, Andi"`). Disertakan sebagai bagian `## Daftar Peserta` di notulen |
 | `--tujuan-email <teks>` | — | Email penerima notulen dipisah koma (mis. `"budi@mail.com, siti@mail.com"`). Kirim notulen via Resend API setelah dibuat |
@@ -285,6 +296,7 @@ Folder Anda akan secara otomatis terstruktur seperti ini:
 Hasil_Notulen/ Notulen_Rapat_2026...md    ← notulen Markdown (heading & tabel rapi)
 Hasil_Transkripsi/ Transkrip_2026...txt   ← transkrip mentah (untuk dokumentasi)
 Hasil_Subtitle/ subtitle_2026...srt       ← subtitle SRT/VTT (jika --subtitle diaktifkan)
+Hasil_Translate/ Transkrip_2026_en.txt   ← terjemahan (jika --translate diaktifkan)
 Hasil_Rekaman/ rekaman_zoom_2026...wav    ← audio (jika merekam via aplikasi ini)
 ```
 
