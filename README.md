@@ -41,6 +41,7 @@ Rekam audio  →  Transkripsi (faster-whisper lokal / Gemini cloud)  →  Notule
 - 📄 **Subtitle/Caption generator**: buat file subtitle `.srt` (SubRip) atau `.vtt` (WebVTT) dari transkrip untuk video player.
 - 🌐 **Translate transkrip**: terjemahkan transkrip ke bahasa lain via Gemini (`--translate en`, `--translate ja`, dll.). Mempertahankan format timestamp dan label pembicara.
 - 🔍 **Search di transkrip**: cari kata/frasa di transkrip dengan `--search "kata kunci"`. Mendukung regex dan case-sensitive.
+- 📕 **Export ke PDF**: konversi transkrip dan notulen ke file PDF dengan `--pdf`. Format rapi dengan heading dan timestamp berwarna.
 
 ---
 
@@ -263,6 +264,12 @@ python zoom_notulen.py --search "Budi" --search-case
 # Cari di file transkrip tertentu
 python zoom_notulen.py --search "Budi" --transkrip Hasil_Transkripsi/Transkrip_xxx.txt
 
+# Export transkrip dan notulen ke PDF
+python zoom_notulen.py --audio rapat.wav --pdf
+
+# Export saja ke PDF (tanpa format lain)
+python zoom_notulen.py --audio rapat.wav --pdf --format txt
+
 # SUPER CEPAT: transkripsi cloud via Gemini (verbatim + timestamp + pembicara)
 python zoom_notulen.py --audio rekaman_zoom.wav --engine gemini
 
@@ -299,6 +306,7 @@ python zoom_notulen.py --durasi 3600 --tujuan-email "budi@mail.com, siti@mail.co
 | `--search <kata>` | — | Cari kata/frasa di transkrip. Mendukung regex dengan `--search-regex` |
 | `--search-regex` | off | Gunakan mode regex untuk `--search` |
 | `--search-case` | off | Huruf besar/kecil berbeda saat search (default: case-insensitive) |
+| `--pdf` | off | Export transkrip dan notulen ke file PDF (butuh fpdf2) |
 | `--judul <teks>` | otomatis | Judul notulen (dipakai Gemini di heading `# Notulen Rapat - ...`). Jika kosong, Gemini menentukan topik dari transkrip |
 | `--daftar-peserta <teks>` | — | Daftar peserta rapat dipisah koma (mis. `"Budi, Siti, Andi"`). Disertakan sebagai bagian `## Daftar Peserta` di notulen |
 | `--tujuan-email <teks>` | — | Email penerima notulen dipisah koma (mis. `"budi@mail.com, siti@mail.com"`). Kirim notulen via Resend API setelah dibuat |
@@ -313,6 +321,7 @@ Hasil_Notulen/ Notulen_Rapat_2026...md    ← notulen Markdown (heading & tabel 
 Hasil_Transkripsi/ Transkrip_2026...txt   ← transkrip mentah (untuk dokumentasi)
 Hasil_Subtitle/ subtitle_2026...srt       ← subtitle SRT/VTT (jika --subtitle diaktifkan)
 Hasil_Translate/ Transkrip_2026_en.txt   ← terjemahan (jika --translate diaktifkan)
+Hasil_PDF/ Transkrip_2026...pdf          ← file PDF (jika --pdf diaktifkan)
 Hasil_Rekaman/ rekaman_zoom_2026...wav    ← audio (jika merekam via aplikasi ini)
 ```
 

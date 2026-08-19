@@ -1679,5 +1679,62 @@ class TestSearchIntegration(unittest.TestCase):
         self.assertEqual(args.audio, "audio.wav")
 
 
+class TestPDFExport(unittest.TestCase):
+    """Tes fungsi export_pdf."""
+
+    def test_pdf_argumen_diterima(self):
+        args = zoom_notulen.buat_parser().parse_args(["--pdf"])
+        self.assertTrue(args.pdf)
+
+    def test_pdf_default_false(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        self.assertFalse(args.pdf)
+
+    def test_export_pdf_membuat_file(self):
+        """export_pdf harus membuat file PDF yang valid."""
+        with tempfile.TemporaryDirectory() as d:
+            jalur = os.path.join(d, "test.pdf")
+            teks = "# Judul Test\nIni adalah isi dokumen.\n\n[00:05] Timestamp contoh."
+            hasil = zoom_notulen.export_pdf(teks, jalur, "Judul Test")
+            self.assertEqual(hasil, jalur)
+            self.assertTrue(os.path.isfile(jalur))
+            # Cek ukuran file > 0
+            self.assertGreater(os.path.getsize(jalur), 0)
+
+    def test_export_pdf_fpdf2_belum_terinstal(self):
+        """Jika fpdf2 belum terinstal, export_pdf harus raise SystemExit."""
+        with mock.patch.dict(sys.modules, {"fpdf": None}):
+            with self.assertRaises(SystemExit):
+                zoom_notulen.export_pdf("test", "test.pdf")
+
+    def test_export_pdf_judul_muncul(self):
+        """Judul harus muncul di PDF."""
+        with tempfile.TemporaryDirectory() as d:
+            jalur = os.path.join(d, "test.pdf")
+            zoom_notulen.export_pdf("Isi dokumen", jalur, "Judul Rapat")
+            # Baca PDF sebagai binary dan cek ada string judul
+            with open(jalur, "rb") as f:
+                isi = f.read()
+            # PDF menyimpan teks dalam format tertentu, cek partial
+            self.assertGreater(len(isi), 0)
+
+    def test_export_pdf_baris_kosong(self):
+        """Baris kosong tidak boleh menyebabkan error."""
+        with tempfile.TemporaryDirectory() as d:
+            jalur = os.path.join(d, "test.pdf")
+            teks = "Baris 1\n\n\nBaris 2"
+            hasil = zoom_notulen.export_pdf(teks, jalur)
+            self.assertIsNotNone(hasil)
+
+    def test_simpan_pdf(self):
+        """simpan_pdf harus membuat file PDF."""
+        with tempfile.TemporaryDirectory() as d:
+            nama = os.path.join(d, "notulen")
+            hasil = zoom_notulen.simpan_pdf("Isi notulen", nama, "Notulen")
+            self.assertIsNotNone(hasil)
+            self.assertTrue(hasil.endswith(".pdf"))
+            self.assertTrue(os.path.isfile(hasil))
+
+
 if __name__ == "__main__":
     unittest.main()

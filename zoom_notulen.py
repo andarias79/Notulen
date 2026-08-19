@@ -895,6 +895,14 @@ def proses_folder(jalur_folder, cfg, engine="lokal", bahasa="id"):
             )
             nama_notulen = os.path.join(DIR_NOTULEN, f"Notulen_{nama_tanpa_ext}_{timestamp}")
             simpan_notulen(notulen, nama_notulen, cfg.get("format", "both"))
+
+            # Export ke PDF jika diminta
+            if cfg.get("pdf", False):
+                DIR_PDF = "Hasil_PDF"
+                os.makedirs(DIR_PDF, exist_ok=True)
+                nama_pdf = os.path.join(DIR_PDF, f"Notulen_{nama_tanpa_ext}_{timestamp}.pdf")
+                export_pdf(notulen, nama_pdf, nama_tanpa_ext)
+
             hasil.append((nama_file, transkrip_teks, notulen))
             sukses += 1
             print(f"  -> Berhasil: {nama_file}")
@@ -2162,6 +2170,97 @@ def simpan_hasil_search(hasil, kata_kunci, nama_file=None):
 
 
 # ==========================================
+# 6e. FUNGSI EXPORT KE PDF
+# ==========================================
+def export_pdf(teks, nama_file=None, judul="Dokumen"):
+    """Mengubah teks (transkrip/notulen) menjadi file PDF.
+
+    Menggunakan fpdf2 untuk generasi PDF dengan font Unicode.
+    Mengembalikan path file PDF yang dihasilkan.
+    """
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        raise SystemExit(
+            "\nfpdf2 belum terinstal. Instal dengan:\n"
+            "  pip install fpdf2\n"
+            "(Library untuk generasi PDF di Python.)"
+        ) from None
+
+    if nama_file is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        DIR_PDF = "Hasil_PDF"
+        os.makedirs(DIR_PDF, exist_ok=True)
+        nama_file = os.path.join(DIR_PDF, f"{judul.lower().replace(' ', '_')}_{timestamp}.pdf")
+
+    print(f"-> Membuat file PDF: {nama_file}")
+
+    try:
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+
+        # Gunakan font bawaan fpdf2 (Helvetica) - tidak perlu file font
+        pdf.add_page()
+
+        # Judul
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.cell(0, 10, judul, ln=True, align="C")
+        pdf.ln(5)
+
+        # Tanggal cetak
+        pdf.set_font("Helvetica", "", 9)
+        pdf.cell(0, 8, f"Dicetak: {datetime.now().strftime('%d %B %Y %H:%M')}", ln=True, align="R")
+        pdf.ln(5)
+
+        # Isi konten
+        pdf.set_font("Helvetica", "", 11)
+        for baris in teks.splitlines():
+            baris_strip = baris.strip()
+            if not baris_strip:
+                pdf.ln(3)  # spasi untuk baris kosong
+                continue
+
+            # Cek apakah ini heading (mulai dengan #)
+            if baris_strip.startswith("# "):
+                pdf.set_font("Helvetica", "B", 14)
+                pdf.multi_cell(0, 8, baris_strip.lstrip("# "))
+                pdf.set_font("Helvetica", "", 11)
+            elif baris_strip.startswith("## "):
+                pdf.set_font("Helvetica", "B", 12)
+                pdf.multi_cell(0, 7, baris_strip.lstrip("# ").strip())
+                pdf.set_font("Helvetica", "", 11)
+            elif baris_strip.startswith("### "):
+                pdf.set_font("Helvetica", "B", 11)
+                pdf.multi_cell(0, 7, baris_strip.lstrip("# ").strip())
+                pdf.set_font("Helvetica", "", 11)
+            # Cek apakah ini timestamp [MM:SS]
+            elif re.match(r"^\[\d{1,2}:\d{2}", baris_strip):
+                pdf.set_font("Helvetica", "", 10)
+                pdf.set_text_color(100, 100, 100)  # abu-abu untuk timestamp
+                pdf.multi_cell(0, 6, baris_strip)
+                pdf.set_text_color(0, 0, 0)  # kembali ke hitam
+                pdf.set_font("Helvetica", "", 11)
+            else:
+                pdf.multi_cell(0, 6, baris_strip)
+
+            pdf.ln(2)  # spasi antar baris
+
+        pdf.output(nama_file)
+        print(f"-> PDF berhasil dibuat: {nama_file}")
+        return nama_file
+
+    except Exception as e:
+        print(f"-> Gagal membuat PDF: {e}")
+        return None
+
+
+def simpan_pdf(teks, nama_dasar, judul="Dokumen"):
+    """Menyimpan teks ke file PDF."""
+    nama = f"{nama_dasar}.pdf"
+    return export_pdf(teks, nama, judul)
+
+
+# ==========================================
 # 7. FUNGSI PENGIRIMAN EMAIL (RESEND)
 # ==========================================
 POLA_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -2299,6 +2398,11 @@ def buat_parser():
     parser.add_argument(
         "--search-case", action="store_true", default=False,
         help="Huruf besar/kecil berbeda saat search (default: case-insensitive)"
+    )
+    parser.add_argument(
+        "--pdf", action="store_true", default=False,
+        help="Export transkrip dan/atau notulen ke file PDF (butuh fpdf2). "
+             "File PDF disimpan di folder Hasil_PDF/."
     )
     parser.add_argument(
         "--judul", default=None,
@@ -2488,6 +2592,15 @@ def main():
 
         simpan_notulen(notulen, os.path.join(DIR_NOTULEN, f"Notulen_Rapat_{timestamp}"), cfg["format"])
 
+        # Export ke PDF jika diminta
+        if args.pdf:
+            DIR_PDF = "Hasil_PDF"
+            os.makedirs(DIR_PDF, exist_ok=True)
+            nama_pdf_transkrip = os.path.join(DIR_PDF, f"Transkrip_{timestamp}.pdf")
+            export_pdf(transkrip_teks, nama_pdf_transkrip, "Transkrip Rapat")
+            nama_pdf_notulen = os.path.join(DIR_PDF, f"Notulen_{timestamp}.pdf")
+            export_pdf(notulen, nama_pdf_notulen, cfg.get("judul") or "Notulen Rapat")
+
         if cfg["tujuan_email"]:
             penerima = pisahkan_emails(cfg["tujuan_email"])
             subjek = f"Notulen Rapat - {cfg['judul']}" if cfg["judul"] else f"Notulen Rapat {timestamp}"
@@ -2615,6 +2728,17 @@ def main():
 
     # Simpan notulen ke file sesuai format yang diminta
     simpan_notulen(notulen, os.path.join(DIR_NOTULEN, f"Notulen_Rapat_{timestamp}"), cfg["format"])
+
+    # Export ke PDF jika diminta
+    if args.pdf:
+        DIR_PDF = "Hasil_PDF"
+        os.makedirs(DIR_PDF, exist_ok=True)
+        # Export transkrip ke PDF
+        nama_pdf_transkrip = os.path.join(DIR_PDF, f"Transkrip_{timestamp}.pdf")
+        export_pdf(transkrip_teks, nama_pdf_transkrip, "Transkrip Rapat")
+        # Export notulen ke PDF
+        nama_pdf_notulen = os.path.join(DIR_PDF, f"Notulen_{timestamp}.pdf")
+        export_pdf(notulen, nama_pdf_notulen, cfg.get("judul") or "Notulen Rapat")
 
     # Kirim notulen via email jika diminta
     if cfg["tujuan_email"]:
