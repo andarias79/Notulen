@@ -75,12 +75,47 @@ if "notulen" not in st.session_state:
     st.session_state.notulen = None
 if "notulen_original" not in st.session_state:
     st.session_state.notulen_original = None
+if "edit_history" not in st.session_state:
+    st.session_state.edit_history = []  # List of previous notulen states
+if "history_index" not in st.session_state:
+    st.session_state.history_index = -1  # Current position in history
 if "audio_file" not in st.session_state:
     st.session_state.audio_file = None
 if "is_recording" not in st.session_state:
     st.session_state.is_recording = False
 if "recording_thread" not in st.session_state:
     st.session_state.recording_thread = None
+
+
+def simpan_ke_history(teks):
+    """Simpan teks ke history untuk undo/redo."""
+    # Hapus history setelah index saat ini (jika user edit setelah undo)
+    st.session_state.edit_history = st.session_state.edit_history[:st.session_state.history_index + 1]
+    # Tambah state baru
+    st.session_state.edit_history.append(teks)
+    st.session_state.history_index = len(st.session_state.edit_history) - 1
+    # Batasi history maksimal 50 item
+    if len(st.session_state.edit_history) > 50:
+        st.session_state.edit_history = st.session_state.edit_history[-50:]
+        st.session_state.history_index = len(st.session_state.edit_history) - 1
+
+
+def undo():
+    """Undo: kembali ke state sebelumnya."""
+    if st.session_state.history_index > 0:
+        st.session_state.history_index -= 1
+        st.session_state.notulen = st.session_state.edit_history[st.session_state.history_index]
+        return True
+    return False
+
+
+def redo():
+    """Redo: maju ke state berikutnya."""
+    if st.session_state.history_index < len(st.session_state.edit_history) - 1:
+        st.session_state.history_index += 1
+        st.session_state.notulen = st.session_state.edit_history[st.session_state.history_index]
+        return True
+    return False
 
 
 # ==========================================
@@ -169,6 +204,10 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
     
     # Simpan notulen asli untuk fitur edit/reset
     st.session_state.notulen_original = notulen
+    
+    # Inisialisasi history untuk undo/redo
+    st.session_state.edit_history = [notulen]
+    st.session_state.history_index = 0
 
     # 3. Subtitle (opsional)
     if subtitle != "none":
@@ -460,12 +499,27 @@ with tab3:
                     key="notulen_edit",
                 )
                 
-                # Tombol simpan perubahan
-                col_save, col_reset, col_regenerate = st.columns(3)
+                # Toolbar Undo/Redo + Simpan
+                col_undo, col_redo, col_save, col_reset, col_regenerate = st.columns([1, 1, 2, 1, 1])
+                
+                with col_undo:
+                    if st.button("↩️ Undo", use_container_width=True, help="Kembali ke perubahan sebelumnya"):
+                        if undo():
+                            st.rerun()
+                        else:
+                            st.warning("Tidak ada yang bisa di-undo")
+                
+                with col_redo:
+                    if st.button("↪️ Redo", use_container_width=True, help="Maju ke perubahan berikutnya"):
+                        if redo():
+                            st.rerun()
+                        else:
+                            st.warning("Tidak ada yang bisa di-redo")
                 
                 with col_save:
                     if st.button("💾 Simpan Perubahan", type="primary", use_container_width=True):
                         st.session_state.notulen = notulen_edited
+                        simpan_ke_history(notulen_edited)
                         # Simpan ke file
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         DIR_NOTULEN = "Hasil_Notulen"
@@ -477,18 +531,24 @@ with tab3:
                         st.rerun()
                 
                 with col_reset:
-                    if st.button("🔄 Reset ke Asli", use_container_width=True):
+                    if st.button("🔄 Reset", use_container_width=True, help="Kembalikan ke notulen asli"):
                         st.session_state.notulen = st.session_state.notulen_original if hasattr(st.session_state, 'notulen_original') else st.session_state.notulen
+                        simpan_ke_history(st.session_state.notulen)
                         st.info("🔄 Notulen dikembalikan ke asli.")
                         st.rerun()
                 
                 with col_regenerate:
-                    if st.button("🤖 Generate Ulang", use_container_width=True):
+                    if st.button("🤖 Regenerate", use_container_width=True, help="Buat notulen baru dari transkrip"):
                         st.info("⏳ Membuat notulen baru...")
-                        # Simpan notulen asli jika belum ada
                         if not hasattr(st.session_state, 'notulen_original'):
                             st.session_state.notulen_original = st.session_state.notulen
                         st.rerun()
+                
+                # Tampilkan info history
+                if st.session_state.edit_history:
+                    posisi = st.session_state.history_index + 1
+                    total = len(st.session_state.edit_history)
+                    st.caption(f"📚 History: {posisi}/{total} perubahan")
 
         # Tombol download
         st.subheader("💾 Download Hasil")
@@ -538,6 +598,7 @@ with tab4:
     - **Rekam Audio**: Rekam langsung dari mikrofon atau audio sistem
     - **Transkripsi**: Konversi audio ke teks dengan faster-whisper atau Gemini
     - **Notulen Otomatis**: Buat notulen terstruktur dengan Gemini AI
+    - **Edit Notulen**: Edit notulen langsung di browser dengan undo/redo
     - **Subtitle**: Generate file subtitle .srt atau .vtt
     - **Translate**: Terjemahkan transkrip ke bahasa lain
     - **Export PDF**: Konversi hasil ke file PDF
