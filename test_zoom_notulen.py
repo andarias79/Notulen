@@ -1375,6 +1375,112 @@ class TestKonfigurasiBaru(unittest.TestCase):
         with self.assertRaises(SystemExit):
             zoom_notulen.buat_parser().parse_args(["--notulen-mode", "turbo"])
 
+    def test_subtitle_argumen_diterima(self):
+        args = zoom_notulen.buat_parser().parse_args(["--subtitle", "srt"])
+        self.assertEqual(args.subtitle, "srt")
+
+    def test_subtitle_default_none(self):
+        args = zoom_notulen.buat_parser().parse_args([])
+        self.assertIsNone(args.subtitle)
+
+
+class TestSubtitleGenerator(unittest.TestCase):
+    """Tes fungsi subtitle generator (SRT dan VTT)."""
+
+    TRANSKRIP_CONTOH = (
+        "[00:05] Halo semuanya, selamat pagi.\n"
+        "[00:10] Pembicara 1: Mari kita mulai rapat hari ini.\n"
+        "[01:30] Pembicara 2: Baik, saya setuju.\n"
+        "[02:15:30] Pembicara 1: Terima kasih atas presentasinya.\n"
+    )
+
+    def test_parse_transkrip_ke_segments(self):
+        """Parsing transkrip menghasilkan segments yang benar."""
+        segments = zoom_notulen._parse_transkrip_ke_segments(self.TRANSKRIP_CONTOH)
+        self.assertEqual(len(segments), 4)
+        self.assertEqual(segments[0]["start"], 5.0)
+        self.assertEqual(segments[0]["text"], "Halo semuanya, selamat pagi.")
+        self.assertEqual(segments[1]["start"], 10.0)
+        self.assertEqual(segments[2]["start"], 90.0)  # 1:30 = 90 detik
+        self.assertEqual(segments[3]["start"], 8130.0)  # 2:15:30 = 2*3600+15*60+30
+
+    def test_parse_transkrip_kosong(self):
+        """Transkrip kosong menghasilkan list kosong."""
+        segments = zoom_notulen._parse_transkrip_ke_segments("")
+        self.assertEqual(segments, [])
+
+    def test_detik_ke_srt_timestamp(self):
+        """Konversi detik ke format SRT benar."""
+        self.assertEqual(zoom_notulen._detik_ke_srt_timestamp(0), "00:00:00,000")
+        self.assertEqual(zoom_notulen._detik_ke_srt_timestamp(65.5), "00:01:05,500")
+        self.assertEqual(zoom_notulen._detik_ke_srt_timestamp(3661.123), "01:01:01,123")
+
+    def test_detik_ke_vtt_timestamp(self):
+        """Konversi detik ke format VTT benar."""
+        self.assertEqual(zoom_notulen._detik_ke_vtt_timestamp(0), "00:00:00.000")
+        self.assertEqual(zoom_notulen._detik_ke_vtt_timestamp(65.5), "00:01:05.500")
+        self.assertEqual(zoom_notulen._detik_ke_vtt_timestamp(3661.123), "01:01:01.123")
+
+    def test_generate_srt(self):
+        """Generate SRT menghasilkan file yang valid."""
+        with tempfile.TemporaryDirectory() as d:
+            jalur = os.path.join(d, "test.srt")
+            hasil = zoom_notulen.generate_srt(self.TRANSKRIP_CONTOH, jalur)
+            self.assertEqual(hasil, jalur)
+            self.assertTrue(os.path.isfile(jalur))
+            with open(jalur, "r", encoding="utf-8") as f:
+                isi = f.read()
+            self.assertIn("1\n00:00:05,000 -->", isi)
+            self.assertIn("Halo semuanya", isi)
+            self.assertNotIn("WEBVTT", isi)  # SRT tidak punya header WEBVTT
+
+    def test_generate_vtt(self):
+        """Generate VTT menghasilkan file yang valid."""
+        with tempfile.TemporaryDirectory() as d:
+            jalur = os.path.join(d, "test.vtt")
+            hasil = zoom_notulen.generate_vtt(self.TRANSKRIP_CONTOH, jalur)
+            self.assertEqual(hasil, jalur)
+            self.assertTrue(os.path.isfile(jalur))
+            with open(jalur, "r", encoding="utf-8") as f:
+                isi = f.read()
+            self.assertTrue(isi.startswith("WEBVTT"))
+            self.assertIn("1\n00:00:05.000 -->", isi)
+            self.assertIn("Halo semuanya", isi)
+
+    def test_generate_srt_tanpa_timestamp(self):
+        """Transkrip tanpa timestamp tetap menghasilkan subtitle."""
+        with tempfile.TemporaryDirectory() as d:
+            jalur = os.path.join(d, "test.srt")
+            hasil = zoom_notulen.generate_srt("Tidak ada timestamp", jalur)
+            self.assertIsNone(hasil)  # Tidak ada segmen -> None
+
+    def test_simpan_subtitle_both(self):
+        """simpan_subtitle dengan format 'both' menghasilkan .srt dan .vtt."""
+        with tempfile.TemporaryDirectory() as d:
+            nama_dasar = os.path.join(d, "subtitle")
+            hasil = zoom_notulen.simpan_subtitle(
+                self.TRANSKRIP_CONTOH, nama_dasar, "both"
+            )
+            self.assertEqual(len(hasil), 2)
+            self.assertTrue(any(".srt" in h for h in hasil))
+            self.assertTrue(any(".vtt" in h for h in hasil))
+
+    def test_simpan_subtitle_srt_only(self):
+        """simpan_subtitle dengan format 'srt' hanya menghasilkan .srt."""
+        with tempfile.TemporaryDirectory() as d:
+            nama_dasar = os.path.join(d, "subtitle")
+            hasil = zoom_notulen.simpan_subtitle(
+                self.TRANSKRIP_CONTOH, nama_dasar, "srt"
+            )
+            self.assertEqual(len(hasil), 1)
+            self.assertTrue(hasil[0].endswith(".srt"))
+
+    def test_timestamp_1_jam_lebih(self):
+        """Timestamp lebih dari 1 jam ditangani dengan benar."""
+        transkrip = "[01:30:00] Test panjang"
+        segments = zoom_notulen._parse_transkrip_ke_segments(transkrip)
+        self.assertEqual(segments[0]["start"], 5400.0)  # 1:30:00 = 5400 detik
+
 
 if __name__ == "__main__":
     unittest.main()

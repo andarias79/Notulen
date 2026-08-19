@@ -146,6 +146,7 @@ def terapkan_konfigurasi(args, konfig):
         "konteks": None,
         "noise_reduce": False,
         "notulen_mode": "multi",
+        "subtitle": "none",
     }
 
     # 1. Dari file konfigurasi
@@ -863,6 +864,13 @@ def proses_folder(jalur_folder, cfg, engine="lokal", bahasa="id"):
         nama_transkrip = os.path.join(DIR_TRANSKRIP, f"Transkrip_{nama_tanpa_ext}_{timestamp}.txt")
         simpan_transkrip(transkrip_teks, nama_transkrip)
         print(f"  -> Transkrip tersimpan: {os.path.basename(nama_transkrip)}")
+
+        # Generate subtitle jika diminta
+        if cfg.get("subtitle", "none") != "none":
+            DIR_SUBTITLE = "Hasil_Subtitle"
+            os.makedirs(DIR_SUBTITLE, exist_ok=True)
+            nama_subtitle = os.path.join(DIR_SUBTITLE, f"subtitle_{nama_tanpa_ext}_{timestamp}")
+            simpan_subtitle(transkrip_teks, nama_subtitle, cfg["subtitle"])
 
         # Buat notulen
         print("  -> Membuat notulen...")
@@ -1757,6 +1765,195 @@ def simpan_notulen(teks, nama_dasar, format_file):
 
 
 # ==========================================
+# 6b. FUNGSI SUBTITLE GENERATOR (.srt / .vtt)
+# ==========================================
+POLA_TIMESTAMP_SUBTITLE = re.compile(r"^\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]\s*(.*)")
+
+
+def _parse_transkrip_ke_segments(teks_transkrip):
+    """Mengubah teks transkrip [MM:SS] menjadi list dict {start, end, text}.
+
+    Format transkrip:
+      [00:05] Halo semuanya
+      [01:30:15] Pembicara 1: Selamat pagi
+
+    Mengembalikan list of dict: [{"start": 5.0, "end": 10.0, "text": "Halo semuanya"}, ...]
+    """
+    segments = []
+    waktu_sebelumnya = 0.0
+
+    for baris in teks_transkrip.splitlines():
+        baris = baris.strip()
+        if not baris:
+            continue
+
+        match = POLA_TIMESTAMP_SUBTITLE.match(baris)
+        if not match:
+            # Baris tanpa timestamp, gabung dengan segmen sebelumnya
+            if segments:
+                segments[-1]["text"] += " " + baris
+            continue
+
+        teks = match.group(4).strip()
+
+        # Format: [MM:SS] atau [HH:MM:SS]
+        if match.group(3) is not None:
+            # [HH:MM:SS]
+            jam = int(match.group(1))
+            menit = int(match.group(2))
+            detik = int(match.group(3))
+        else:
+            # [MM:SS]
+            jam = 0
+            menit = int(match.group(1))
+            detik = int(match.group(2))
+
+        start = jam * 3600 + menit * 60 + detik
+
+        # Set end segmen sebelumnya ke waktu mulai segmen ini
+        if segments:
+            segments[-1]["end"] = start
+
+        # Estimasi durasi segmen: min 2 detik, max 10 detik
+        # (berdasarkan panjang teks)
+        estimasi_durasi = max(2.0, min(10.0, len(teks) * 0.08))
+        end = start + estimasi_durasi
+
+        segments.append({
+            "start": start,
+            "end": end,
+            "text": teks,
+        })
+        waktu_sebelumnya = start
+
+    # Update end segmen terakhir
+    if segments:
+        segments[-1]["end"] = segments[-1]["start"] + 3.0  # default 3 detik
+
+    return segments
+
+
+def _detik_ke_srt_timestamp(detik):
+    """Mengkonversi detik ke format SRT: HH:MM:SS,mmm"""
+    jam = int(detik // 3600)
+    menit = int((detik % 3600) // 60)
+    det = int(detik % 60)
+    mili = int((detik % 1) * 1000)
+    return f"{jam:02d}:{menit:02d}:{det:02d},{mili:03d}"
+
+
+def _detik_ke_vtt_timestamp(detik):
+    """Mengkonversi detik ke format VTT: HH:MM:SS.mmm"""
+    jam = int(detik // 3600)
+    menit = int((detik % 3600) // 60)
+    det = int(detik % 60)
+    mili = int((detik % 1) * 1000)
+    return f"{jam:02d}:{menit:02d}:{det:02d}.{mili:03d}"
+
+
+def generate_srt(teks_transkrip, nama_file=None):
+    """Mengubah transkrip [MM:SS] menjadi file subtitle .srt (SubRip).
+
+    Format SRT yang dihasilkan:
+      1
+      00:00:05,000 --> 00:00:10,000
+      Halo semuanya
+
+      2
+      00:01:30,000 --> 00:01:35,000
+      Pembicara 1: Selamat pagi
+
+    Mengembalikan path file .srt yang dihasilkan.
+    """
+    if nama_file is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        DIR_SUBTITLE = "Hasil_Subtitle"
+        os.makedirs(DIR_SUBTITLE, exist_ok=True)
+        nama_file = os.path.join(DIR_SUBTITLE, f"subtitle_{timestamp}.srt")
+
+    segments = _parse_transkrip_ke_segments(teks_transkrip)
+    if not segments:
+        print("-> Peringatan: tidak ada segmen untuk dibuat subtitle.")
+        return None
+
+    baris = []
+    for i, seg in enumerate(segments, 1):
+        start_str = _detik_ke_srt_timestamp(seg["start"])
+        end_str = _detik_ke_srt_timestamp(seg["end"])
+        baris.append(str(i))
+        baris.append(f"{start_str} --> {end_str}")
+        baris.append(seg["text"])
+        baris.append("")  # blank line separator
+
+    with open(nama_file, "w", encoding="utf-8") as f:
+        f.write("\n".join(baris))
+
+    print(f"-> Subtitle SRT disimpan: {nama_file} ({len(segments)} segmen)")
+    return nama_file
+
+
+def generate_vtt(teks_transkrip, nama_file=None):
+    """Mengubah transkrip [MM:SS] menjadi file subtitle .vtt (WebVTT).
+
+    Format VTT yang dihasilkan:
+      WEBVTT
+
+      1
+      00:00:05.000 --> 00:00:10.000
+      Halo semuanya
+
+      2
+      00:01:30.000 --> 00:01:35.000
+      Pembicara 1: Selamat pagi
+
+    Mengembalikan path file .vtt yang dihasilkan.
+    """
+    if nama_file is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        DIR_SUBTITLE = "Hasil_Subtitle"
+        os.makedirs(DIR_SUBTITLE, exist_ok=True)
+        nama_file = os.path.join(DIR_SUBTITLE, f"subtitle_{timestamp}.vtt")
+
+    segments = _parse_transkrip_ke_segments(teks_transkrip)
+    if not segments:
+        print("-> Peringatan: tidak ada segmen untuk dibuat subtitle.")
+        return None
+
+    baris = ["WEBVTT", ""]  # header VTT
+    for i, seg in enumerate(segments, 1):
+        start_str = _detik_ke_vtt_timestamp(seg["start"])
+        end_str = _detik_ke_vtt_timestamp(seg["end"])
+        baris.append(str(i))
+        baris.append(f"{start_str} --> {end_str}")
+        baris.append(seg["text"])
+        baris.append("")  # blank line separator
+
+    with open(nama_file, "w", encoding="utf-8") as f:
+        f.write("\n".join(baris))
+
+    print(f"-> Subtitle VTT disimpan: {nama_file} ({len(segments)} segmen)")
+    return nama_file
+
+
+def simpan_subtitle(teks_transkrip, nama_dasar, format_subtitle):
+    """Menyimpan subtitle dalam format yang diminta: 'srt', 'vtt', atau 'both'."""
+    disimpan = []
+    if format_subtitle in ("srt", "both"):
+        nama = f"{nama_dasar}.srt"
+        hasil = generate_srt(teks_transkrip, nama)
+        if hasil:
+            disimpan.append(hasil)
+    if format_subtitle in ("vtt", "both"):
+        nama = f"{nama_dasar}.vtt"
+        hasil = generate_vtt(teks_transkrip, nama)
+        if hasil:
+            disimpan.append(hasil)
+    if disimpan:
+        print(f"Subtitle berhasil disimpan ke: {', '.join(disimpan)}")
+    return disimpan
+
+
+# ==========================================
 # 7. FUNGSI PENGIRIMAN EMAIL (RESEND)
 # ==========================================
 POLA_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -1869,6 +2066,11 @@ def buat_parser():
              "'both' = keduanya (default)."
     )
     parser.add_argument(
+        "--subtitle", choices=["srt", "vtt", "both", "none"], default=None,
+        help="Buat file subtitle dari transkrip: 'srt' = SubRip (.srt), 'vtt' = WebVTT (.vtt), "
+             "'both' = keduanya, 'none' = tidak buat subtitle (default)."
+    )
+    parser.add_argument(
         "--judul", default=None,
         help="Judul notulen (mis. 'Rapat Mingguan Tim Produk'). Jika tidak diisi, "
              "Gemini menentukan topik dari transkrip."
@@ -1978,9 +2180,16 @@ def main():
                 p.strip() for p in cfg["daftar_peserta"].split(",") if p.strip()
             )
 
-        notulen = _buat_notulen_sesuai_mode(
+        notulen = _buat_notulan_sesuai_mode(
             cfg, transkrip_teks, daftar_peserta
         )
+
+        # Generate subtitle jika diminta
+        if cfg["subtitle"] != "none":
+            DIR_SUBTITLE = "Hasil_Subtitle"
+            os.makedirs(DIR_SUBTITLE, exist_ok=True)
+            nama_subtitle = os.path.join(DIR_SUBTITLE, f"subtitle_{timestamp}")
+            simpan_subtitle(transkrip_teks, nama_subtitle, cfg["subtitle"])
 
         # Validasi anti-halusinasi
         nama_mencurigakan = periksa_halusinasi_notulen(notulen, transkrip_teks)
@@ -2071,6 +2280,13 @@ def main():
     # Simpan transkrip mentah ke file terpisah untuk dokumentasi
     nama_transkrip = os.path.join(DIR_TRANSKRIP, f"Transkrip_{timestamp}.txt")
     simpan_transkrip(transkrip_teks, nama_transkrip)
+
+    # Generate subtitle jika diminta
+    if cfg["subtitle"] != "none":
+        DIR_SUBTITLE = "Hasil_Subtitle"
+        os.makedirs(DIR_SUBTITLE, exist_ok=True)
+        nama_subtitle = os.path.join(DIR_SUBTITLE, f"subtitle_{timestamp}")
+        simpan_subtitle(transkrip_teks, nama_subtitle, cfg["subtitle"])
 
     print("\n--- HASIL TRANSKRIP RAW ---")
     print(transkrip_teks)
