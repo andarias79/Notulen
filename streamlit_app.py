@@ -118,6 +118,67 @@ def redo():
     return False
 
 
+def bandingkan_teks(teks_lama, teks_baru):
+    """Membandingkan dua teks dan menghasilkan diff.
+    
+    Mengembalikan HTML dengan highlight perubahan:
+    - Hijau: baris yang ditambahkan
+    - Merah: baris yang dihapus
+    - Kuning: baris yang diubah
+    """
+    import difflib
+    
+    baris_lama = teks_lama.splitlines(keepends=True)
+    baris_baru = teks_baru.splitlines(keepends=True)
+    
+    # Generate unified diff
+    diff = difflib.unified_diff(
+        baris_lama,
+        baris_baru,
+        fromfile='Original',
+        tofile='Edited',
+        lineterm=''
+    )
+    
+    # Konversi ke HTML dengan warna
+    html_lines = ['<div style="font-family: monospace; font-size: 12px; padding: 10px; background: #f8f9fa; border-radius: 5px; max-height: 400px; overflow-y: auto;">']
+    
+    jumlah_tambah = 0
+    jumlah_hapus = 0
+    jumlah_ubah = 0
+    
+    for line in diff:
+        line = line.rstrip('\n')
+        if line.startswith('+++') or line.startswith('---') or line.startswith('@@'):
+            # Header diff - tampilkan abu-abu
+            html_lines.append(f'<div style="color: #6c757d; padding: 2px 5px;">{line}</div>')
+        elif line.startswith('+'):
+            # Baris ditambahkan - hijau
+            html_lines.append(f'<div style="background: #d4edda; color: #155724; padding: 2px 5px;">+ {line[1:]}</div>')
+            jumlah_tambah += 1
+        elif line.startswith('-'):
+            # Baris dihapus - merah
+            html_lines.append(f'<div style="background: #f8d7da; color: #721c24; padding: 2px 5px; text-decoration: line-through;">- {line[1:]}</div>')
+            jumlah_hapus += 1
+        else:
+            # Baris tidak berubah
+            html_lines.append(f'<div style="padding: 2px 5px;">{line}</div>')
+    
+    html_lines.append('</div>')
+    
+    # Tambah statistik
+    stats_html = f'''
+    <div style="margin-top: 10px; padding: 10px; background: #e9ecef; border-radius: 5px;">
+        <strong>Statistik Perubahan:</strong>
+        <span style="color: #28a745; margin-left: 10px;">+ {jumlah_tambah} ditambahkan</span>
+        <span style="color: #dc3545; margin-left: 10px;">- {jumlah_hapus} dihapus</span>
+        <span style="color: #ffc107; margin-left: 10px;">~ {len(baris_baru)} total baris</span>
+    </div>
+    '''
+    
+    return stats_html + ''.join(html_lines)
+
+
 # ==========================================
 # FUNGSI HELPER
 # ==========================================
@@ -478,11 +539,11 @@ with tab3:
         with col2:
             st.subheader("📋 Notulen")
             
-            # Mode toggle: Preview atau Edit
+            # Mode toggle: Preview, Edit, atau Compare
             mode_notulen = st.radio(
                 "Mode Notulen",
-                options=["preview", "edit"],
-                format_func=lambda x: "👁️ Preview" if x == "preview" else "✏️ Edit",
+                options=["preview", "edit", "compare"],
+                format_func=lambda x: {"preview": "👁️ Preview", "edit": "✏️ Edit", "compare": "🔍 Compare"}[x],
                 horizontal=True,
                 key="mode_notulen",
             )
@@ -490,6 +551,19 @@ with tab3:
             if mode_notulen == "preview":
                 # Mode preview: tampilkan markdown
                 st.markdown(st.session_state.notulen)
+            
+            elif mode_notulen == "compare":
+                # Mode compare: tampilkan perbedaan
+                if hasattr(st.session_state, 'notulen_original') and st.session_state.notulen_original:
+                    if st.session_state.notulen != st.session_state.notulen_original:
+                        st.markdown("**Perbedaan antara Original dan Edit:**")
+                        diff_html = bandingkan_teks(st.session_state.notulen_original, st.session_state.notulen)
+                        st.markdown(diff_html, unsafe_allow_html=True)
+                    else:
+                        st.info("✅ Tidak ada perubahan. Notulen sama dengan versi original.")
+                else:
+                    st.info("ℹ️ Belum ada versi original untuk dibandingkan.")
+            
             else:
                 # Mode edit: text area untuk edit
                 notulen_edited = st.text_area(
