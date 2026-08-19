@@ -10,6 +10,7 @@ Atau dengan opsi:
 """
 
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -566,6 +567,79 @@ with tab3:
             
             else:
                 # Mode edit: text area untuk edit
+                
+                # ── Find & Replace ──
+                with st.expander("🔍 Find & Replace", expanded=False):
+                    fr_col1, fr_col2 = st.columns(2)
+                    with fr_col1:
+                        find_text = st.text_input("Cari", key="find_text", placeholder="Teks yang dicari...")
+                    with fr_col2:
+                        replace_text = st.text_input("Ganti dengan", key="replace_text", placeholder="Teks pengganti...")
+                    
+                    fr_opts1, fr_opts2, fr_opts3 = st.columns([1, 1, 2])
+                    with fr_opts1:
+                        case_sensitive = st.checkbox("Case sensitive", key="find_case")
+                    with fr_opts2:
+                        use_regex = st.checkbox("Regex", key="find_regex")
+                    with fr_opts3:
+                        # Hitung jumlah match
+                        match_count = 0
+                        if find_text:
+                            try:
+                                teks_current = st.session_state.notulen or ""
+                                if use_regex:
+                                    flags = 0 if case_sensitive else re.IGNORECASE
+                                    matches = re.findall(find_text, teks_current, flags)
+                                    match_count = len(matches)
+                                else:
+                                    if case_sensitive:
+                                        match_count = teks_current.count(find_text)
+                                    else:
+                                        match_count = teks_current.lower().count(find_text.lower())
+                            except re.error:
+                                match_count = -1  # invalid regex
+                        
+                        if match_count >= 0:
+                            st.caption(f"🔍 Ditemukan: **{match_count}** match")
+                        else:
+                            st.caption("⚠️ Regex tidak valid")
+                    
+                    # Tombol aksi Find & Replace
+                    fr_btn1, fr_btn2, fr_btn3 = st.columns(3)
+                    with fr_btn1:
+                        if st.button("🔄 Replace All", use_container_width=True, help="Ganti semua match"):
+                            if find_text and st.session_state.notulen is not None:
+                                try:
+                                    teks = st.session_state.notulen
+                                    if use_regex:
+                                        flags = 0 if case_sensitive else re.IGNORECASE
+                                        teks_baru = re.sub(find_text, replace_text, teks, flags=flags)
+                                    else:
+                                        if case_sensitive:
+                                            teks_baru = teks.replace(find_text, replace_text)
+                                        else:
+                                            # Case-insensitive replace manual
+                                            pattern = re.compile(re.escape(find_text), re.IGNORECASE)
+                                            teks_baru = pattern.sub(replace_text, teks)
+                                    
+                                    if teks_baru != st.session_state.notulen:
+                                        st.session_state.notulen = teks_baru
+                                        simpan_ke_history(teks_baru)
+                                        st.success(f"✅ Semua match diganti!")
+                                        st.rerun()
+                                    else:
+                                        st.info("Tidak ada perubahan.")
+                                except re.error as e:
+                                    st.error(f"Regex error: {e}")
+                    
+                    with fr_btn2:
+                        if st.button("◀️ Find Prev", use_container_width=True, help="Cari match sebelumnya"):
+                            st.info("💡 Edit teks di bawah, lalu klik '💾 Simpan'.")
+                    
+                    with fr_btn3:
+                        if st.button("▶️ Find Next", use_container_width=True, help="Cari match berikutnya"):
+                            st.info("💡 Edit teks di bawah, lalu klik '💾 Simpan'.")
+                
                 notulen_edited = st.text_area(
                     "Edit Notulen",
                     value=st.session_state.notulen,
