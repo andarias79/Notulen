@@ -152,6 +152,7 @@ def terapkan_konfigurasi(args, konfig):
         "subtitle": "none",
         "translate": None,
         "no_vad": False,
+        "flac": False,
     }
 
     # 1. Dari file konfigurasi
@@ -563,6 +564,38 @@ def _resample_ke_16khz(nama_file, rate_asli, kanal_asli):
         return jalur
     except Exception as e:
         print(f"-> Peringatan: gagal resample audio ({e}). Menggunakan file asli.")
+        return None
+
+
+def kompres_wav_ke_flac(nama_file):
+    """Mengompres file WAV ke FLAC (lossless compression).
+
+    FLAC mengurangi ukuran file ~50-60% tanpa kehilangan kualitas.
+    Mengembalikan path file FLAC, atau None jika gagal.
+    """
+    try:
+        import soundfile as sf
+    except ImportError:
+        print("-> Peringatan: library 'soundfile' belum terinstal. Lewati kompresi FLAC.")
+        return None
+
+    if not nama_file.lower().endswith(".wav"):
+        print("-> Peringatan: file bukan WAV. Lewati kompresi FLAC.")
+        return None
+
+    jalur_flac = nama_file[:-4] + ".flac"
+    ukuran_wav = os.path.getsize(nama_file)
+
+    print(f"-> Mengompres WAV ke FLAC...")
+    try:
+        data, samplerate = sf.read(nama_file, dtype="int16")
+        sf.write(jalur_flac, data, samplerate, format="FLAC", subtype="PCM_16")
+        ukuran_flac = os.path.getsize(jalur_flac)
+        pengurangan = (1 - ukuran_flac / ukuran_wav) * 100
+        print(f"   WAV: {ukuran_wav / 1024 / 1024:.1f} MB -> FLAC: {ukuran_flac / 1024 / 1024:.1f} MB ({pengurangan:.0%} lebih kecil)")
+        return jalur_flac
+    except Exception as e:
+        print(f"-> Peringatan: gagal kompresi FLAC ({e}). Menggunakan file WAV.")
         return None
 
 
@@ -2433,6 +2466,11 @@ def buat_parser():
              "VAD bisa terlalu agresif pada audio dengan volume rendah."
     )
     parser.add_argument(
+        "--flac", action="store_true", default=False,
+        help="Kompresi file audio WAV ke FLAC (lossless) setelah rekaman. "
+             "Mengurangi ukuran file ~50-60% tanpa kehilangan kualitas."
+    )
+    parser.add_argument(
         "--format", choices=["md", "txt", "both"], default=None,
         help="Format file notulen yang disimpan: 'md' = Markdown, 'txt' = teks polos, "
              "'both' = keduanya (default)."
@@ -2706,6 +2744,14 @@ def main():
                 "  Transkripsi tetap dicoba - jika hasilnya kosong/tidak berguna,\n"
                 "  jalankan ulang perekaman dengan durasi yang lebih lama.\n"
             )
+
+    # Kompresi FLAC otomatis setelah rekaman (hemat ruang disk)
+    if cfg.get("flac", False) and audio_file.lower().endswith(".wav"):
+        jalur_flac = kompres_wav_ke_flac(audio_file)
+        if jalur_flac:
+            # Ganti audio_file ke FLAC untuk transkripsi
+            audio_file = jalur_flac
+            print(f"-> File FLAC siap untuk transkripsi: {jalur_flac}")
 
     # Deteksi rekaman hampir sunyi SEBELUM transkripsi (hemat waktu & kuota)
     rms = ukur_rms(audio_file)
