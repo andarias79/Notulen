@@ -230,12 +230,22 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
     # 1. Transkripsi
     with st.status("📝 Memproses transkripsi...", expanded=True) as status:
         st.write(f"Engine: {engine} | Bahasa: {bahasa}")
+        
+        # Inisialisasi progress bar
+        progress_bar = st.progress(0, text="Menyiapkan model...")
+        
+        def update_progress(p):
+            progress_bar.progress(p, text=f"Transkripsi berjalan... {int(p*100)}%")
+
         try:
             transkrip_teks = zoom_notulen.transkripsi_audio(
-                audio_path, bahasa, engine
+                audio_path, bahasa, engine,
+                progress_callback=update_progress if engine == "lokal" else None
             )
+            progress_bar.progress(1.0, text="Selesai!")
             status.update(label="✅ Transkripsi selesai!", state="complete")
         except Exception as e:
+            progress_bar.empty()
             status.update(label="❌ Transkripsi gagal", state="error")
             return None, None, str(e)
 

@@ -39,6 +39,24 @@ import sys
 import tempfile
 import threading
 import time
+
+import logging
+import os
+import sys
+
+logger = logging.getLogger("notulen")
+logger.setLevel(logging.DEBUG)
+
+if not logger.handlers:
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(ch)
+
+    fh = logging.FileHandler("notulen.log", encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(fh)
 import wave
 from datetime import datetime
 
@@ -238,7 +256,7 @@ def _pantau_tombol_henti(berhenti, pause_event=None):
             tombol = msvcrt.getch().lower()
             if tombol in (TOMBOL_HENTI.encode(), b"\x03"):  # 'q' atau Ctrl+C
                 berhenti.set()
-                print(f"\n-> Tombol '{TOMBOL_HENTI}' ditekan: menghentikan perekaman...")
+                logger.info(f"\n-> Tombol '{TOMBOL_HENTI}' ditekan: menghentikan perekaman...")
                 return
             elif pause_event is not None and tombol in (TOMBOL_PAUSE.encode(), TOMBOL_RESUME.encode()):
                 if pause_event.is_set():
@@ -296,8 +314,8 @@ def rekam_audio(durasi_detik, nama_file):
     untuk menghentikan lebih awal: file TETAP disimpan dan lanjut diproses.
     Mengembalikan durasi yang benar-benar terekam (detik).
     """
-    print(f"\n[1/3] Merekam audio rapat selama {durasi_detik} detik (16 kHz mono)...")
-    print(f"      Tekan '{TOMBOL_HENTI}' = stop | '{TOMBOL_PAUSE}' = pause/resume")
+    logger.info(f"\n[1/3] Merekam audio rapat selama {durasi_detik} detik (16 kHz mono)...")
+    logger.info(f"      Tekan '{TOMBOL_HENTI}' = stop | '{TOMBOL_PAUSE}' = pause/resume")
     try:
         channels = KANAL_REKAM
         sampwidth = 2  # paInt16
@@ -340,7 +358,7 @@ def rekam_audio(durasi_detik, nama_file):
                         try:
                             data, overflowed = stream.read(chunk)
                         except KeyboardInterrupt:
-                            print("\n-> Perekaman dihentikan (Ctrl+C). Audio disimpan & diproses.")
+                            logger.info("\n-> Perekaman dihentikan (Ctrl+C). Audio disimpan & diproses.")
                             break
                         frames_diperoleh = len(data) // frame_bytes
                         if frames_diperoleh < chunk:
@@ -359,7 +377,7 @@ def rekam_audio(durasi_detik, nama_file):
                     _cetak_progress(total_read, total_frames, SAMPLE_RATE)
                     print()  # newline setelah progress bar
         except KeyboardInterrupt:
-            print("\n-> Perekaman dihentikan (Ctrl+C). Audio disimpan & diproses.")
+            logger.info("\n-> Perekaman dihentikan (Ctrl+C). Audio disimpan & diproses.")
         finally:
             # Matikan utas pemantau tombol - jika tidak, ia terus menelan tombol q
             # selama transkripsi/prompt berikutnya (utas daemon bocor per sesi).
@@ -373,7 +391,7 @@ def rekam_audio(durasi_detik, nama_file):
             f"-> Perekaman dihentikan lebih awal setelah {durasi_aktual:.1f} detik. "
             "Audio tetap disimpan & akan diproses."
         )
-    print(f"-> Perekaman selesai. File disimpan sebagai: {nama_file}")
+    logger.info(f"-> Perekaman selesai. File disimpan sebagai: {nama_file}")
     return durasi_aktual
 
 
@@ -397,21 +415,21 @@ def daftar_perangkat_loopback():
     """Mencetak daftar perangkat output WASAPI yang mendukung loopback."""
     pyaudio = _impor_pyaudiowpatch()
     with pyaudio.PyAudio() as p:
-        print("\nPerangkat WASAPI loopback yang tersedia:")
+        logger.info("\nPerangkat WASAPI loopback yang tersedia:")
         for device in p.get_loopback_device_info_generator():
             print(
                 f"  [{device['index']}] {device['name']} "
                 f"(ch {device['maxInputChannels']}, {int(device['defaultSampleRate'])} Hz)"
             )
-        print("\nGunakan index di atas dengan opsi --perangkat <index>.")
+        logger.info("\nGunakan index di atas dengan opsi --perangkat <index>.")
 
 
 def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
     """Merekam audio sistem (WASAPI loopback) - menangkap semua suara yang keluar dari speaker."""
     pyaudio = _impor_pyaudiowpatch()
 
-    print(f"\n[1/3] Merekam audio sistem (WASAPI loopback) selama {durasi_detik} detik...")
-    print(f"      Tekan '{TOMBOL_HENTI}' (atau Ctrl+C) untuk menghentikan lebih awal.")
+    logger.info(f"\n[1/3] Merekam audio sistem (WASAPI loopback) selama {durasi_detik} detik...")
+    logger.info(f"      Tekan '{TOMBOL_HENTI}' (atau Ctrl+C) untuk menghentikan lebih awal.")
     with pyaudio.PyAudio() as p:
         wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
 
@@ -443,14 +461,14 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
         sample_rate_rekam = int(device["defaultSampleRate"])
         chunk = 1024
         sudah_resample = False  # menandakan apakah perlu resample di akhir
-        print(f"-> Merekam dari: {device['name']}")
+        logger.info(f"-> Merekam dari: {device['name']}")
         if sample_rate_rekam != SAMPLE_RATE or channels_rekam != KANAL_REKAM:
-            print(f"      Format asli: {sample_rate_rekam} Hz, {channels_rekam} ch")
-            print(f"      (akan di-resample ke {SAMPLE_RATE} Hz mono setelah perekaman)")
+            logger.info(f"      Format asli: {sample_rate_rekam} Hz, {channels_rekam} ch")
+            logger.info(f"      (akan di-resample ke {SAMPLE_RATE} Hz mono setelah perekaman)")
             sudah_resample = True
         else:
-            print(f"      Format: {sample_rate_rekam} Hz mono")
-        print(f"      Tekan '{TOMBOL_HENTI}' = stop | '{TOMBOL_PAUSE}' = pause/resume")
+            logger.info(f"      Format: {sample_rate_rekam} Hz mono")
+        logger.info(f"      Tekan '{TOMBOL_HENTI}' = stop | '{TOMBOL_PAUSE}' = pause/resume")
 
         try:
             # Rekam di format native perangkat - WASAPI hanya menerima
@@ -501,7 +519,7 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
                         try:
                             data = stream.read(chunk, exception_on_overflow=False)
                         except KeyboardInterrupt:
-                            print("\n-> Perekaman dihentikan (Ctrl+C). Audio disimpan & diproses.")
+                            logger.info("\n-> Perekaman dihentikan (Ctrl+C). Audio disimpan & diproses.")
                             break
                         frames_diperoleh = len(data) // frame_bytes
                         if frames_diperoleh < chunk:
@@ -519,7 +537,7 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
                     _cetak_progress(total_read, total_frames, sample_rate_rekam)
                     print()
             except KeyboardInterrupt:
-                print("\n-> Perekaman dihentikan (Ctrl+C). Audio disimpan & diproses.")
+                logger.info("\n-> Perekaman dihentikan (Ctrl+C). Audio disimpan & diproses.")
             except Exception as e:
                 raise SystemExit(f"\nERROR saat merekam audio loopback: {e}") from e
         finally:
@@ -538,7 +556,7 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
 
     # Resample ke 16 kHz mono (standar Whisper) jika format asli berbeda
     if sudah_resample and os.path.isfile(nama_file):
-        print(f"-> Resample dari {sample_rate_rekam} Hz {channels_rekam}ch ke {SAMPLE_RATE} Hz mono...")
+        logger.info(f"-> Resample dari {sample_rate_rekam} Hz {channels_rekam}ch ke {SAMPLE_RATE} Hz mono...")
         jalur_16khz = _resample_ke_16khz(nama_file, sample_rate_rekam, channels_rekam)
         if jalur_16khz and os.path.isfile(jalur_16khz):
             # Ganti file asli dengan hasil resample
@@ -546,18 +564,18 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
                 import shutil
                 shutil.move(jalur_16khz, nama_file)
             except Exception as e:
-                print(f"-> Peringatan: gagal mengganti file ({e}). File asli tetap dipakai.")
+                logger.info(f"-> Peringatan: gagal mengganti file ({e}). File asli tetap dipakai.")
                 # Hapus file resample yang gagal dipindah
                 try:
                     os.remove(jalur_16khz)
                 except OSError:
                     pass
             else:
-                print(f"-> Resample selesai: {nama_file}")
+                logger.info(f"-> Resample selesai: {nama_file}")
         else:
-            print(f"-> Resample gagal, menggunakan file asli ({sample_rate_rekam} Hz {channels_rekam}ch)")
+            logger.info(f"-> Resample gagal, menggunakan file asli ({sample_rate_rekam} Hz {channels_rekam}ch)")
 
-    print(f"-> Perekaman selesai. File disimpan sebagai: {nama_file}")
+    logger.info(f"-> Perekaman selesai. File disimpan sebagai: {nama_file}")
     return durasi_aktual
 
 
@@ -593,14 +611,19 @@ def _resample_ke_16khz(nama_file, rate_asli, kanal_asli):
         data_int16 = (data * 32767).clip(-32768, 32767).astype(np.int16)
         fd, jalur = tempfile.mkstemp(suffix="_16khz.wav")
         os.close(fd)
-        with wave.open(jalur, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(SAMPLE_RATE)
-            wf.writeframes(data_int16.tobytes())
-        return jalur
+        try:
+            with wave.open(jalur, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(SAMPLE_RATE)
+                wf.writeframes(data_int16.tobytes())
+            return jalur
+        except Exception:
+            if os.path.exists(jalur):
+                os.remove(jalur)
+            raise
     except Exception as e:
-        print(f"-> Peringatan: gagal resample audio ({e}). Menggunakan file asli.")
+        logger.info(f"-> Peringatan: gagal resample audio ({e}). Menggunakan file asli.")
         return None
 
 
@@ -615,36 +638,41 @@ def kompres_wav_ke_flac(nama_file, jalur_output=None):
     try:
         import soundfile as sf
     except ImportError:
-        print("-> Peringatan: library 'soundfile' belum terinstal. Lewati kompresi FLAC.")
+        logger.info("-> Peringatan: library 'soundfile' belum terinstal. Lewati kompresi FLAC.")
         return None
 
     if not nama_file.lower().endswith(".wav"):
-        print("-> Peringatan: file bukan WAV. Lewati kompresi FLAC.")
+        logger.info("-> Peringatan: file bukan WAV. Lewati kompresi FLAC.")
         return None
 
     if jalur_output is None:
         jalur_output = nama_file[:-4] + ".flac"
     ukuran_wav = os.path.getsize(nama_file)
 
-    print(f"-> Mengompres WAV ke FLAC...")
+    logger.info(f"-> Mengompres WAV ke FLAC...")
     try:
         CHUNK_FRAMES = 1024 * 1024  # ~1M frames per chunk
-        with sf.SoundFile(nama_file, "r") as src:
-            with sf.SoundFile(
-                jalur_output, "w", samplerate=src.samplerate,
-                channels=src.channels, format="FLAC", subtype="PCM_16"
-            ) as dst:
-                while True:
-                    data = src.read(CHUNK_FRAMES, dtype="int16")
-                    if len(data) == 0:
-                        break
-                    dst.write(data)
-        ukuran_flac = os.path.getsize(jalur_output)
-        pengurangan = (1 - ukuran_flac / ukuran_wav) * 100
-        print(f"   WAV: {ukuran_wav / 1024 / 1024:.1f} MB -> FLAC: {ukuran_flac / 1024 / 1024:.1f} MB ({pengurangan:.0%} lebih kecil)")
-        return jalur_output
+        try:
+            with sf.SoundFile(nama_file, "r") as src:
+                with sf.SoundFile(
+                    jalur_output, "w", samplerate=src.samplerate,
+                    channels=src.channels, format="FLAC", subtype="PCM_16"
+                ) as dst:
+                    while True:
+                        data = src.read(CHUNK_FRAMES, dtype="int16")
+                        if len(data) == 0:
+                            break
+                        dst.write(data)
+            ukuran_flac = os.path.getsize(jalur_output)
+            pengurangan = (1 - ukuran_flac / ukuran_wav) * 100
+            logger.info(f"   WAV: {ukuran_wav / 1024 / 1024:.1f} MB -> FLAC: {ukuran_flac / 1024 / 1024:.1f} MB ({pengurangan:.0%} lebih kecil)")
+            return jalur_output
+        except Exception:
+            if os.path.exists(jalur_output):
+                os.remove(jalur_output)
+            raise
     except Exception as e:
-        print(f"-> Peringatan: gagal kompresi FLAC ({e}). Menggunakan file WAV.")
+        logger.info(f"-> Peringatan: gagal kompresi FLAC ({e}). Menggunakan file WAV.")
         return None
 
 
@@ -668,7 +696,7 @@ def kurangi_noise(nama_file):
         )
         return None
 
-    print("-> Mengurangi noise latar belakang audio...")
+    logger.info("-> Mengurangi noise latar belakang audio...")
     try:
         info = sf.info(nama_file)
         rate = info.samplerate
@@ -679,30 +707,35 @@ def kurangi_noise(nama_file):
         fd, jalur = tempfile.mkstemp(suffix="_clean.wav")
         os.close(fd)
 
-        with sf.SoundFile(nama_file, "r") as src:
-            with sf.SoundFile(
-                jalur, "w", samplerate=rate, channels=channels,
-                format="WAV", subtype="PCM_16"
-            ) as dst:
-                while True:
-                    data = src.read(chunk_frames, dtype="float32")
-                    if len(data) == 0:
-                        break
-                    # Mono atau multi-channel: noisereduce menangani keduanya
-                    if len(data.shape) > 1 and data.shape[1] > 1:
-                        # Proses per kanal lalu gabung kembali
-                        import numpy as np
-                        cleaned = np.column_stack([
-                            nr.reduce_noise(y=data[:, ch], sr=rate, prop_decrease=0.7)
-                            for ch in range(data.shape[1])
-                        ])
-                    else:
-                        cleaned = nr.reduce_noise(y=data, sr=rate, prop_decrease=0.7)
-                    dst.write(cleaned)
-        print(f"-> Noise reduction selesai: {jalur}")
-        return jalur
+        try:
+            with sf.SoundFile(nama_file, "r") as src:
+                with sf.SoundFile(
+                    jalur, "w", samplerate=rate, channels=channels,
+                    format="WAV", subtype="PCM_16"
+                ) as dst:
+                    while True:
+                        data = src.read(chunk_frames, dtype="float32")
+                        if len(data) == 0:
+                            break
+                        # Mono atau multi-channel: noisereduce menangani keduanya
+                        if len(data.shape) > 1 and data.shape[1] > 1:
+                            # Proses per kanal lalu gabung kembali
+                            import numpy as np
+                            cleaned = np.column_stack([
+                                nr.reduce_noise(y=data[:, ch], sr=rate, prop_decrease=0.7)
+                                for ch in range(data.shape[1])
+                            ])
+                        else:
+                            cleaned = nr.reduce_noise(y=data, sr=rate, prop_decrease=0.7)
+                        dst.write(cleaned)
+            logger.info(f"-> Noise reduction selesai: {jalur}")
+            return jalur
+        except Exception:
+            if os.path.exists(jalur):
+                os.remove(jalur)
+            raise
     except Exception as e:
-        print(f"-> Peringatan: gagal mengurangi noise ({e}). Menggunakan audio asli.")
+        logger.info(f"-> Peringatan: gagal mengurangi noise ({e}). Menggunakan audio asli.")
         return None
 
 
@@ -724,8 +757,8 @@ def unduh_audio_youtube(url, nama_file=None):
             "(Library untuk download audio/video dari YouTube dan situs lain.)"
         ) from None
 
-    print(f"\n-> Mengunduh audio dari YouTube...")
-    print(f"   URL: {url}")
+    logger.info(f"\n-> Mengunduh audio dari YouTube...")
+    logger.info(f"   URL: {url}")
 
     if nama_file is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -755,15 +788,15 @@ def unduh_audio_youtube(url, nama_file=None):
             info = ydl.extract_info(url, download=True)
             judul = info.get("title", "YouTube Audio")
             durasi = info.get("duration", 0)
-            print(f"   Judul: {judul}")
+            logger.info(f"   Judul: {judul}")
             if durasi:
-                print(f"   Durasi: {_format_durasi(durasi)}")
+                logger.info(f"   Durasi: {_format_durasi(durasi)}")
     except yt_dlp.utils.DownloadError as e:
-        print(f"\n-> Gagal mengunduh dari YouTube: {e}")
-        print("   Pastikan URL valid dan yt-dlp ter-update (pip install -U yt-dlp).")
+        logger.info(f"\n-> Gagal mengunduh dari YouTube: {e}")
+        logger.info("   Pastikan URL valid dan yt-dlp ter-update (pip install -U yt-dlp).")
         return None
     except Exception as e:
-        print(f"\n-> Gagal mengunduh dari YouTube: {e}")
+        logger.info(f"\n-> Gagal mengunduh dari YouTube: {e}")
         return None
 
     # yt-dlp mungkin menghasilkan file dengan nama sedikit berbeda
@@ -776,7 +809,7 @@ def unduh_audio_youtube(url, nama_file=None):
             if os.path.isfile(kandidat):
                 if ext != ".wav":
                     # Konversi ke WAV jika perlu
-                    print(f"-> Mengonversi {ext} ke WAV...")
+                    logger.info(f"-> Mengonversi {ext} ke WAV...")
                     try:
                         import subprocess
                         subprocess.run(
@@ -786,17 +819,17 @@ def unduh_audio_youtube(url, nama_file=None):
                         )
                         os.remove(kandidat)
                     except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                        print(f"-> Gagal konversi ke WAV: {e}")
+                        logger.info(f"-> Gagal konversi ke WAV: {e}")
                         # Jika ffmpeg tidak ada, coba pakai file asli
                         if ext in (".m4a", ".mp3"):
                             return kandidat
                         return None
                 break
         else:
-            print("-> File audio tidak ditemukan setelah download.")
+            logger.info("-> File audio tidak ditemukan setelah download.")
             return None
 
-    print(f"-> Audio tersimpan: {nama_file}")
+    logger.info(f"-> Audio tersimpan: {nama_file}")
     return nama_file
 
 
@@ -824,7 +857,7 @@ def ekstrak_audio_dari_video(jalur_video, jalur_output=None):
         nama_base = os.path.splitext(os.path.basename(jalur_video))[0]
         jalur_output = os.path.join(DIR_REKAMAN, f"{nama_base}_{timestamp}.wav")
 
-    print(f"-> Mengekstrak audio dari video: {os.path.basename(jalur_video)}")
+    logger.info(f"-> Mengekstrak audio dari video: {os.path.basename(jalur_video)}")
 
     # Coba ffmpeg langsung
     try:
@@ -840,12 +873,12 @@ def ekstrak_audio_dari_video(jalur_video, jalur_output=None):
             check=True,
             capture_output=True,
         )
-        print(f"-> Audio terekstrak: {jalur_output}")
+        logger.info(f"-> Audio terekstrak: {jalur_output}")
         return jalur_output
     except FileNotFoundError:
-        print("-> ffmpeg tidak ditemukan. Mencoba via yt-dlp...")
+        logger.info("-> ffmpeg tidak ditemukan. Mencoba via yt-dlp...")
     except subprocess.CalledProcessError as e:
-        print(f"-> ffmpeg gagal: {e.stderr.decode('utf-8', errors='ignore')[:200]}")
+        logger.info(f"-> ffmpeg gagal: {e.stderr.decode('utf-8', errors='ignore')[:200]}")
         return None
 
     # Fallback: gunakan yt-dlp untuk ekstrak audio dari video
@@ -865,14 +898,14 @@ def ekstrak_audio_dari_video(jalur_video, jalur_output=None):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([jalur_video])
         if os.path.isfile(jalur_output):
-            print(f"-> Audio terekstrak (via yt-dlp): {jalur_output}")
+            logger.info(f"-> Audio terekstrak (via yt-dlp): {jalur_output}")
             return jalur_output
     except ImportError:
         pass
     except Exception as e:
-        print(f"-> yt-dlp gagal: {e}")
+        logger.info(f"-> yt-dlp gagal: {e}")
 
-    print("-> Gagal mengekstrak audio. Pastikan ffmpeg terinstal atau file video valid.")
+    logger.info("-> Gagal mengekstrak audio. Pastikan ffmpeg terinstal atau file video valid.")
     return None
 
 
@@ -914,15 +947,15 @@ def proses_folder(jalur_folder, cfg, engine="lokal", bahasa="id"):
         )
 
     total_file = len(files)
-    print(f"\n{'='*60}")
-    print(f"  BATCH PROCESSING: {total_file} file ditemukan")
-    print(f"  Folder: {jalur_folder}")
-    print(f"  Engine: {engine} | Bahasa: {bahasa}")
-    print(f"{'='*60}")
-    print("\nDaftar file:")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"  BATCH PROCESSING: {total_file} file ditemukan")
+    logger.info(f"  Folder: {jalur_folder}")
+    logger.info(f"  Engine: {engine} | Bahasa: {bahasa}")
+    logger.info(f"{'='*60}")
+    logger.info("\nDaftar file:")
     for i, f in enumerate(files, 1):
         ukuran = os.path.getsize(f) / 1024  # KB
-        print(f"  {i:2d}. {os.path.basename(f):<40} ({ukuran:.0f} KB)")
+        logger.info(f"  {i:2d}. {os.path.basename(f):<40} ({ukuran:.0f} KB)")
     print()
 
     hasil = []
@@ -938,19 +971,19 @@ def proses_folder(jalur_folder, cfg, engine="lokal", bahasa="id"):
 
     for i, jalur_file in enumerate(files, 1):
         nama_file = os.path.basename(jalur_file)
-        print(f"\n{'='*60}")
+        logger.info(f"\n{'='*60}")
         _cetak_progress_batch(i, total_file, nama_file)
         print()  # newline setelah progress bar
-        print(f"  File {i}/{total_file}: {nama_file}")
-        print(f"{'='*60}")
+        logger.info(f"  File {i}/{total_file}: {nama_file}")
+        logger.info(f"{'='*60}")
 
         # Ekstrak audio dari video jika perlu
         ext = os.path.splitext(jalur_file)[1].lower()
         if ext in FORMAT_VIDEO:
-            print("  -> Mengekstrak audio dari video...")
+            logger.info("  -> Mengekstrak audio dari video...")
             audio_file = ekstrak_audio_dari_video(jalur_file)
             if not audio_file:
-                print(f"  -> SKIP: gagal mengekstrak audio dari {nama_file}")
+                logger.info(f"  -> SKIP: gagal mengekstrak audio dari {nama_file}")
                 dilewati += 1
                 continue
         else:
@@ -959,26 +992,26 @@ def proses_folder(jalur_folder, cfg, engine="lokal", bahasa="id"):
         # Deteksi sunyi
         rms = ukur_rms(audio_file)
         if rms is not None and rms < AMBANG_RMS_SENYAP:
-            print(f"  -> SKIP: file hampir sunyi (RMS: {rms:.4f})")
+            logger.info(f"  -> SKIP: file hampir sunyi (RMS: {rms:.4f})")
             if ext in FORMAT_VIDEO and audio_file != jalur_file:
                 _hapus_file(audio_file)
             dilewati += 1
             continue
 
         # Transkripsi
-        print("  -> Transkripsi...")
+        logger.info("  -> Transkripsi...")
         try:
             transkrip_teks = transkripsi_audio(audio_file, bahasa, engine,
                                                konteks=cfg.get("konteks"))
         except Exception as e:
-            print(f"  -> SKIP: transkripsi gagal ({e})")
+            logger.info(f"  -> SKIP: transkripsi gagal ({e})")
             if ext in FORMAT_VIDEO and audio_file != jalur_file:
                 _hapus_file(audio_file)
             gagal += 1
             continue
 
         if not transkrip_teks or not transkrip_teks.strip():
-            print("  -> SKIP: transkripsi kosong")
+            logger.info("  -> SKIP: transkripsi kosong")
             if ext in FORMAT_VIDEO and audio_file != jalur_file:
                 _hapus_file(audio_file)
             dilewati += 1
@@ -989,7 +1022,7 @@ def proses_folder(jalur_folder, cfg, engine="lokal", bahasa="id"):
         nama_tanpa_ext = os.path.splitext(nama_file)[0]
         nama_transkrip = os.path.join(DIR_TRANSKRIP, f"Transkrip_{nama_tanpa_ext}_{timestamp}.txt")
         simpan_transkrip(transkrip_teks, nama_transkrip)
-        print(f"  -> Transkrip tersimpan: {os.path.basename(nama_transkrip)}")
+        logger.info(f"  -> Transkrip tersimpan: {os.path.basename(nama_transkrip)}")
 
         # Generate subtitle jika diminta
         if cfg.get("subtitle", "none") != "none":
@@ -1009,7 +1042,7 @@ def proses_folder(jalur_folder, cfg, engine="lokal", bahasa="id"):
             simpan_translate(teks_translate, nama_translate, cfg["translate"])
 
         # Buat notulen
-        print("  -> Membuat notulen...")
+        logger.info("  -> Membuat notulen...")
         try:
             info_rapat = {
                 "tanggal": datetime.now().strftime("%d %B %Y"),
@@ -1030,9 +1063,9 @@ def proses_folder(jalur_folder, cfg, engine="lokal", bahasa="id"):
 
             hasil.append((nama_file, transkrip_teks, notulen))
             sukses += 1
-            print(f"  -> Berhasil: {nama_file}")
+            logger.info(f"  -> Berhasil: {nama_file}")
         except Exception as e:
-            print(f"  -> Gagal buat notulen: {e}")
+            logger.info(f"  -> Gagal buat notulen: {e}")
             hasil.append((nama_file, transkrip_teks, None))
             gagal += 1
 
@@ -1041,15 +1074,15 @@ def proses_folder(jalur_folder, cfg, engine="lokal", bahasa="id"):
             _hapus_file(audio_file)
 
     # Ringkasan akhir
-    print(f"\n{'='*60}")
-    print(f"  RINGKASAN BATCH PROCESSING")
-    print(f"{'='*60}")
-    print(f"  Total file   : {total_file}")
-    print(f"  Berhasil     : {sukses} [OK]")
-    print(f"  Dilewati     : {dilewati} [SKIP] (sunyi/tidak ada audio)")
-    print(f"  Gagal        : {gagal} [FAIL]")
-    print(f"  Output       : {DIR_NOTULEN}/, {DIR_TRANSKRIP}/")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"  RINGKASAN BATCH PROCESSING")
+    logger.info(f"{'='*60}")
+    logger.info(f"  Total file   : {total_file}")
+    logger.info(f"  Berhasil     : {sukses} [OK]")
+    logger.info(f"  Dilewati     : {dilewati} [SKIP] (sunyi/tidak ada audio)")
+    logger.info(f"  Gagal        : {gagal} [FAIL]")
+    logger.info(f"  Output       : {DIR_NOTULEN}/, {DIR_TRANSKRIP}/")
+    logger.info(f"{'='*60}")
 
     return hasil
 
@@ -1092,7 +1125,7 @@ def ukur_rms(nama_file):
         return None
 
 
-def transkripsi_audio(nama_file, bahasa, engine="lokal", konteks=None, no_vad=False):
+def transkripsi_audio(nama_file, bahasa, engine="lokal", konteks=None, no_vad=False, progress_callback=None):
     """Dispatcher transkripsi: memilih engine 'lokal' (faster-whisper, offline)
     atau 'gemini' (transkripsi cloud via Gemini AI - super cepat).
 
@@ -1101,10 +1134,11 @@ def transkripsi_audio(nama_file, bahasa, engine="lokal", konteks=None, no_vad=Fa
 
     konteks: teks konteks/istilah domain untuk meningkatkan akurasi (opsional).
     no_vad: jika True, nonaktifkan VAD filter (untuk audio yang tidak terpotong).
+     progress_callback: fungsi callback untuk menerima persentase progress (0.0-1.0).
     """
     if engine == "gemini":
         return transkripsi_audio_gemini(nama_file, bahasa, konteks=konteks)
-    return transkripsi_audio_lokal(nama_file, bahasa, konteks=konteks, no_vad=no_vad)
+    return transkripsi_audio_lokal(nama_file, bahasa, konteks=konteks, no_vad=no_vad, progress_callback=progress_callback)
 
 
 # ── Singleton cache untuk WhisperModel ──
@@ -1117,15 +1151,15 @@ _whisper_cache = {"model": None, "nama": None}
 def _dapatkan_whisper_model(nama_model=WHISPER_MODEL):
     """Mengembalikan WhisperModel yang di-cache (singleton). Load hanya sekali."""
     if _whisper_cache["model"] is None or _whisper_cache["nama"] != nama_model:
-        print(f"      (memuat model '{nama_model}' ke RAM — proses pertama kali mungkin lambat)")
+        logger.info(f"      (memuat model '{nama_model}' ke RAM — proses pertama kali mungkin lambat)")
         _whisper_cache["model"] = WhisperModel(nama_model, device="cpu", compute_type="int8")
         _whisper_cache["nama"] = nama_model
     else:
-        print(f"      (model '{nama_model}' sudah di-cache — skip loading)")
+        logger.info(f"      (model '{nama_model}' sudah di-cache — skip loading)")
     return _whisper_cache["model"]
 
 
-def transkripsi_audio_lokal(nama_file, bahasa, konteks=None, no_vad=False):
+def transkripsi_audio_lokal(nama_file, bahasa, konteks=None, no_vad=False, progress_callback=None):
     """Mengubah file audio menjadi teks menggunakan faster-whisper (CTranslate2 + INT8).
 
     Jauh lebih cepat daripada openai-whisper (hingga ±4x di CPU) berkat engine
@@ -1143,13 +1177,13 @@ def transkripsi_audio_lokal(nama_file, bahasa, konteks=None, no_vad=False):
         f"\n[2/3] Mengubah audio menjadi teks (faster-whisper '{WHISPER_MODEL}' INT8, "
         f"bahasa '{label}')..."
     )
-    print("      (model CTranslate2 diunduh otomatis saat pertama kali dipakai)")
+    logger.info("      (model CTranslate2 diunduh otomatis saat pertama kali dipakai)")
     if konteks:
-        print(f"      (konteks domain: {konteks[:80]}{'...' if len(konteks) > 80 else ''})")
+        logger.info(f"      (konteks domain: {konteks[:80]}{'...' if len(konteks) > 80 else ''})")
     # Tentukan apakah VAD aktif atau tidak
     vad_aktif = WHISPER_VAD and not no_vad
     if no_vad:
-        print("      ⚠️ VAD dinonaktifkan (--no-vad). Semua bagian audio akan diproses.")
+        logger.info("      ⚠️ VAD dinonaktifkan (--no-vad). Semua bagian audio akan diproses.")
 
     try:
         model = _dapatkan_whisper_model(WHISPER_MODEL)
@@ -1158,53 +1192,50 @@ def transkripsi_audio_lokal(nama_file, bahasa, konteks=None, no_vad=False):
             "beam_size": WHISPER_BEAM_SIZE,
             "vad_filter": vad_aktif,
         }
-        # VAD filter parameters: threshold lebih tinggi = lebih toleran
-        # (tidak terlalu agresif menghapus suara)
         if vad_aktif:
             opsi_transkrip["vad_parameters"] = {
-                "threshold": WHISPER_VAD_THOLD,  # 0.5 = lebih toleran
-                "min_speech_duration_ms": 250,    # min 250ms dianggap suara
-                "min_silence_duration_ms": 500,   # min 500ms dianggap sunyi
-                "speech_pad_ms": 200,             # padding 200ms sebelum/sesudah suara
+                "threshold": WHISPER_VAD_THOLD,
+                "min_speech_duration_ms": 250,
+                "min_silence_duration_ms": 500,
+                "speech_pad_ms": 200,
             }
-        # initial_prompt memberikan konteks domain ke Whisper agar istilah teknis
-        # (mis. singkatan, nama organisasi, jargon) lebih akurat dikenali.
         if konteks:
             opsi_transkrip["initial_prompt"] = konteks
-            # hot-words: meningkatkan probabilitas kata-kata tertentu di Whisper
-            # (space-separated). Sangat membantu untuk istilah teknis yang jarang.
             opsi_transkrip["hotwords"] = konteks
-        print(f"      VAD: {'aktif (threshold=' + str(WHISPER_VAD_THOLD) + ')' if vad_aktif else 'nonaktif'}")
-        segmen, info = model.transcribe(nama_file, **opsi_transkrip)
-        segmen = list(segmen)  # generator lazy -> jalankan seluruh inferensi
+        logger.info(f"      VAD: {'aktif (threshold=' + str(WHISPER_VAD_THOLD) + ')' if vad_aktif else 'nonaktif'}")
+        segmen_generator, info = model.transcribe(nama_file, **opsi_transkrip)
     except Exception as e:
         raise SystemExit(f"\nERROR saat transkripsi: {e}") from e
 
-    if not segmen:
-        raise SystemExit(
-            "\nTranskripsi kosong - audio tidak terdengar atau file rusak.\n"
-            "Cek file audio Anda atau pastikan perangkat input benar."
-        )
     if bahasa == "auto":
-        print(f"-> Bahasa terdeteksi: {info.language or '?'}")
-    print(f"-> Durasi audio: {info.duration:.1f} detik, {len(segmen)} segmen terdeteksi")
+        logger.info(f"-> Bahasa terdeteksi: {info.language or '?'}")
 
     baris = []
-    for s in segmen:
-        teks_seg = (s.text or "").strip()
-        if not teks_seg:
-            continue
-        detik = int(s.start)
-        jam, sisa = divmod(detik, 3600)
-        menit, dtk = divmod(sisa, 60)
-        stempel = f"{jam:02d}:{menit:02d}:{dtk:02d}" if jam else f"{menit:02d}:{dtk:02d}"
-        baris.append(f"[{stempel}] {teks_seg}")
+    total_durasi = info.duration
+
+    try:
+        for s in segmen_generator:
+            teks_seg = (s.text or "").strip()
+            if not teks_seg:
+                continue
+            detik = int(s.start)
+            jam, sisa = divmod(detik, 3600)
+            menit, dtk = divmod(sisa, 60)
+            stempel = f"{jam:02d}:{menit:02d}:{dtk:02d}" if jam else f"{menit:02d}:{dtk:02d}"
+            baris.append(f"[{stempel}] {teks_seg}")
+            
+            if progress_callback and total_durasi > 0:
+                progress_callback(min(1.0, s.end / total_durasi))
+    except Exception as e:
+        raise SystemExit(f"\nERROR saat memproses segmen: {e}") from e
+
     if not baris:
         raise SystemExit(
             "\nTranskripsi kosong - audio tidak terdengar atau file rusak.\n"
             "Cek file audio Anda atau pastikan perangkat input benar."
         )
-    print("-> Transkripsi selesai.")
+    logger.info(f"-> Durasi audio: {info.duration:.1f} detik, {len(baris)} segmen terdeteksi")
+    logger.info("-> Transkripsi selesai.")
     return "\n".join(baris)
 
 
@@ -1328,7 +1359,7 @@ def _parsing_transkrip_gemini(teks, offset=0):
 
 def _unggah_dan_tunggu(client, jalur):
     """Mengunggah file ke File API Gemini lalu menunggu hingga siap (state ACTIVE)."""
-    print(f"-> Mengunggah audio ke Gemini ({os.path.getsize(jalur) / 1e6:.1f} MB)...")
+    logger.info(f"-> Mengunggah audio ke Gemini ({os.path.getsize(jalur) / 1e6:.1f} MB)...")
     berkas = client.files.upload(file=jalur)
     batas_waktu = time.time() + GEMINI_TUNGGU_FILE_DETIK
     while True:
@@ -1342,7 +1373,7 @@ def _unggah_dan_tunggu(client, jalur):
             raise SystemExit(
                 "\nERROR: waktu tunggu pemrosesan file audio di server Gemini habis (10 menit)."
             )
-        print("-> Menunggu audio siap diproses di server...")
+        logger.info("-> Menunggu audio siap diproses di server...")
         time.sleep(3)
 
 
@@ -1356,7 +1387,7 @@ def _transkripsi_gemini_satu(client, nama_file, bahasa, offset=0, konteks=None):
             nama_file.lower().endswith(".wav")
             and os.path.getsize(nama_file) > GEMINI_KOMPRES_FLAC_MIN_MB * 1024 * 1024
         ):
-            print("-> Mengompres WAV ke FLAC sementara (upload lebih cepat)...")
+            logger.info("-> Mengompres WAV ke FLAC sementara (upload lebih cepat)...")
             jalur_flac = _kompres_ke_flac(nama_file)
             if jalur_flac:
                 jalur_upload = jalur_flac
@@ -1411,13 +1442,11 @@ def transkripsi_audio_gemini(nama_file, bahasa, konteks=None):
         f"\n[2/3] Mengubah audio menjadi teks (Gemini cloud '{GEMINI_TRANSKRIPSI_MODEL}', "
         f"bahasa '{label}')..."
     )
-    print("      (audio diunggah ke server Google - butuh internet)")
+    logger.info("      (audio diunggah ke server Google - butuh internet)")
     if konteks:
-        print(f"      (konteks domain: {konteks[:80]}{'...' if len(konteks) > 80 else ''})")
+        logger.info(f"      (konteks domain: {konteks[:80]}{'...' if len(konteks) > 80 else ''})")
     if GEMINI_TRANSKRIPSI_CADANGAN:
-        print(
-            f"      (cadangan otomatis jika kuota/lonjakan: {', '.join(GEMINI_TRANSKRIPSI_CADANGAN)})"
-        )
+        logger.info(f"      (cadangan otomatis jika kuota/lonjakan: {', '.join(GEMINI_TRANSKRIPSI_CADANGAN)})")
 
     durasi = _durasi_audio(nama_file)
     if durasi is None:
@@ -1463,7 +1492,7 @@ def transkripsi_audio_gemini(nama_file, bahasa, konteks=None):
         hasil = "\n".join(semua_baris)
     else:
         hasil = _transkripsi_gemini_satu(client, nama_file, bahasa, konteks=konteks)
-    print("-> Transkripsi selesai.")
+    logger.info("-> Transkripsi selesai.")
     return hasil
 
 
@@ -1531,7 +1560,7 @@ def buat_notulen(teks_transkrip, judul=None, daftar_peserta=None, model=GEMINI_M
 
     info_rapat: dict opsional berisi 'tanggal', 'waktu', 'durasi' untuk metadata notulen.
     """
-    print(f"\n[3/3] Memproses notulen rapat dengan Gemini AI ({model})...")
+    logger.info(f"\n[3/3] Memproses notulen rapat dengan Gemini AI ({model})...")
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     if judul:
@@ -1618,11 +1647,11 @@ def buat_notulen_multipass(teks_transkrip, judul=None, daftar_peserta=None,
     Keuntungan: setiap fakta bisa di-trace ke transkrip, mengurangi halusinasi nama/angka.
     info_rapat: dict opsional berisi 'tanggal', 'waktu', 'durasi' untuk metadata notulen.
     """
-    print(f"\n[3/3] Memproses notulen rapat dengan Gemini AI ({model}) — mode multi-pass...")
+    logger.info(f"\n[3/3] Memproses notulen rapat dengan Gemini AI ({model}) — mode multi-pass...")
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     # ── Pass 1: Ekstraksi Fakta Terstruktur ──
-    print("      Pass 1/2: Mengekstrak fakta dari transkrip...")
+    logger.info("      Pass 1/2: Mengekstrak fakta dari transkrip...")
     prompt_fakta = f"""Anda adalah analis rapat yang teliti. Dari transkrip berikut, ekstrak SEMUA fakta penting secara terstruktur. JANGAN mengarang fakta yang tidak ada di transkrip.
 
 ATURAN KETAT:
@@ -1669,14 +1698,14 @@ TRANSKRIP:
         model_cadangan=GEMINI_NOTULEN_CADANGAN,
     )
     if not resp_fakta.text or not resp_fakta.text.strip():
-        print("-> Pass 1 gagal (kosong). Fallback ke mode single-pass...")
+        logger.info("-> Pass 1 gagal (kosong). Fallback ke mode single-pass...")
         return buat_notulen(teks_transkrip, judul, daftar_peserta, model, info_rapat)
 
     fakta = resp_fakta.text
-    print(f"      Pass 1 selesai: {len(fakta)} karakter fakta diekstrak.")
+    logger.info(f"      Pass 1 selesai: {len(fakta)} karakter fakta diekstrak.")
 
     # ── Pass 2: Susun Notulen Dari Fakta ──
-    print("      Pass 2/2: Menyusun notulen dari fakta terstruktur...")
+    logger.info("      Pass 2/2: Menyusun notulen dari fakta terstruktur...")
     if judul:
         instruksi_judul = f'- Judul yang WAJIB dipakai: "# Notulen Rapat - {judul}"'
     else:
@@ -1741,10 +1770,10 @@ FAKTA TERSTRUKTUR:
         model_cadangan=GEMINI_NOTULEN_CADANGAN,
     )
     if not resp_notulen.text or not resp_notulen.text.strip():
-        print("-> Pass 2 gagal (kosong). Fallback ke mode single-pass...")
+        logger.info("-> Pass 2 gagal (kosong). Fallback ke mode single-pass...")
         return buat_notulen(teks_transkrip, judul, daftar_peserta, model, info_rapat)
 
-    print("      Multi-pass selesai.")
+    logger.info("      Multi-pass selesai.")
     return resp_notulen.text
 
 
@@ -1913,7 +1942,7 @@ def simpan_transkrip(teks, nama_file):
     """Menyimpan transkrip mentah ke file teks (UTF-8)."""
     with open(nama_file, "w", encoding="utf-8") as f:
         f.write(teks)
-    print(f"\n-> Transkrip mentah disimpan ke '{nama_file}'")
+    logger.info(f"\n-> Transkrip mentah disimpan ke '{nama_file}'")
 
 
 def simpan_notulen(teks, nama_dasar, format_file):
@@ -1929,7 +1958,7 @@ def simpan_notulen(teks, nama_dasar, format_file):
         with open(nama, "w", encoding="utf-8") as f:
             f.write(teks)
         disimpan.append(nama)
-    print(f"\nNotulen berhasil disimpan ke: {', '.join(disimpan)}")
+    logger.info(f"\nNotulen berhasil disimpan ke: {', '.join(disimpan)}")
 
 
 # ==========================================
@@ -2041,7 +2070,7 @@ def generate_srt(teks_transkrip, nama_file=None):
 
     segments = _parse_transkrip_ke_segments(teks_transkrip)
     if not segments:
-        print("-> Peringatan: tidak ada segmen untuk dibuat subtitle.")
+        logger.info("-> Peringatan: tidak ada segmen untuk dibuat subtitle.")
         return None
 
     baris = []
@@ -2056,7 +2085,7 @@ def generate_srt(teks_transkrip, nama_file=None):
     with open(nama_file, "w", encoding="utf-8") as f:
         f.write("\n".join(baris))
 
-    print(f"-> Subtitle SRT disimpan: {nama_file} ({len(segments)} segmen)")
+    logger.info(f"-> Subtitle SRT disimpan: {nama_file} ({len(segments)} segmen)")
     return nama_file
 
 
@@ -2084,7 +2113,7 @@ def generate_vtt(teks_transkrip, nama_file=None):
 
     segments = _parse_transkrip_ke_segments(teks_transkrip)
     if not segments:
-        print("-> Peringatan: tidak ada segmen untuk dibuat subtitle.")
+        logger.info("-> Peringatan: tidak ada segmen untuk dibuat subtitle.")
         return None
 
     baris = ["WEBVTT", ""]  # header VTT
@@ -2099,7 +2128,7 @@ def generate_vtt(teks_transkrip, nama_file=None):
     with open(nama_file, "w", encoding="utf-8") as f:
         f.write("\n".join(baris))
 
-    print(f"-> Subtitle VTT disimpan: {nama_file} ({len(segments)} segmen)")
+    logger.info(f"-> Subtitle VTT disimpan: {nama_file} ({len(segments)} segmen)")
     return nama_file
 
 
@@ -2117,7 +2146,7 @@ def simpan_subtitle(teks_transkrip, nama_dasar, format_subtitle):
         if hasil:
             disimpan.append(hasil)
     if disimpan:
-        print(f"Subtitle berhasil disimpan ke: {', '.join(disimpan)}")
+        logger.info(f"Subtitle berhasil disimpan ke: {', '.join(disimpan)}")
     return disimpan
 
 
@@ -2157,7 +2186,7 @@ def translate_transkrip(teks_transkrip, bahasa_tujuan, model=GEMINI_MODEL):
     # Tentukan nama bahasa tujuan
     nama_bahasa = BAHASA_TRANSLATE.get(bahasa_tujuan, bahasa_tujuan)
 
-    print(f"\n-> Menerjemahkan transkrip ke {nama_bahasa} via Gemini ({model})...")
+    logger.info(f"\n-> Menerjemahkan transkrip ke {nama_bahasa} via Gemini ({model})...")
 
     client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -2197,11 +2226,11 @@ TRANSKRIP ASLI:
     )
 
     if not response.text or not response.text.strip():
-        print("-> Peringatan: hasil terjemahan kosong. Menggunakan transkrip asli.")
+        logger.info("-> Peringatan: hasil terjemahan kosong. Menggunakan transkrip asli.")
         return teks_transkrip
 
     hasil = response.text.strip()
-    print(f"-> Terjemahan selesai: {len(hasil)} karakter")
+    logger.info(f"-> Terjemahan selesai: {len(hasil)} karakter")
     return hasil
 
 
@@ -2210,7 +2239,7 @@ def simpan_translate(teks_translate, nama_dasar, bahasa_tujuan):
     nama = f"{nama_dasar}_{bahasa_tujuan}.txt"
     with open(nama, "w", encoding="utf-8") as f:
         f.write(teks_translate)
-    print(f"-> Terjemahan disimpan: {nama}")
+    logger.info(f"-> Terjemahan disimpan: {nama}")
     return nama
 
 
@@ -2236,7 +2265,7 @@ def search_transkrip(teks_transkrip, kata_kunci, case_sensitive=False, use_regex
             # Escape karakter regex untuk pencarian literal
             pola = re.compile(re.escape(kata_kunci), flags)
     except re.error as e:
-        print(f"-> Error regex: {e}")
+        logger.info(f"-> Error regex: {e}")
         return hasil
 
     for i, baris in enumerate(teks_transkrip.splitlines(), 1):
@@ -2267,13 +2296,13 @@ def search_transkrip(teks_transkrip, kata_kunci, case_sensitive=False, use_regex
 def cetak_hasil_search(hasil, kata_kunci, max_hasil=50):
     """Mencetak hasil search dengan format yang rapi."""
     if not hasil:
-        print(f"\n-> Tidak ditemukan '{kata_kunci}' di transkrip.")
+        logger.info(f"\n-> Tidak ditemukan '{kata_kunci}' di transkrip.")
         return
 
-    print(f"\n{'='*60}")
-    print(f"  HASIL PENCARIAN: '{kata_kunci}'")
-    print(f"  Ditemukan: {len(hasil)} hasil")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"  HASIL PENCARIAN: '{kata_kunci}'")
+    logger.info(f"  Ditemukan: {len(hasil)} hasil")
+    logger.info(f"{'='*60}")
 
     for i, h in enumerate(hasil[:max_hasil], 1):
         ts = h["timestamp"] if h["timestamp"] else f"[baris {h['line']}]"
@@ -2281,12 +2310,12 @@ def cetak_hasil_search(hasil, kata_kunci, max_hasil=50):
         teks = h["text"]
         pola = re.compile(re.escape(kata_kunci), re.IGNORECASE)
         teks_highlight = pola.sub(f">>>{kata_kunci.upper()}<<<", teks)
-        print(f"\n  {i}. {ts} {teks_highlight}")
+        logger.info(f"\n  {i}. {ts} {teks_highlight}")
 
     if len(hasil) > max_hasil:
-        print(f"\n  ... dan {len(hasil) - max_hasil} hasil lainnya.")
+        logger.info(f"\n  ... dan {len(hasil) - max_hasil} hasil lainnya.")
 
-    print(f"\n{'='*60}")
+    logger.info(f"\n{'='*60}")
 
 
 def simpan_hasil_search(hasil, kata_kunci, nama_file=None):
@@ -2314,7 +2343,7 @@ def simpan_hasil_search(hasil, kata_kunci, nama_file=None):
     with open(nama_file, "w", encoding="utf-8") as f:
         f.write("\n".join(baris))
 
-    print(f"-> Hasil search disimpan: {nama_file}")
+    logger.info(f"-> Hasil search disimpan: {nama_file}")
     return nama_file
 
 
@@ -2369,7 +2398,7 @@ def export_pdf(teks, nama_file=None, judul="Dokumen"):
         os.makedirs(DIR_PDF, exist_ok=True)
         nama_file = os.path.join(DIR_PDF, f"{judul.lower().replace(' ', '_')}_{timestamp}.pdf")
 
-    print(f"-> Membuat file PDF: {nama_file}")
+    logger.info(f"-> Membuat file PDF: {nama_file}")
 
     try:
         pdf = FPDF()
@@ -2389,7 +2418,7 @@ def export_pdf(teks, nama_file=None, judul="Dokumen"):
         else:
             # Fallback ke Helvetica (tidak support Unicode penuh)
             nama_font = "Helvetica"
-            print("-> Peringatan: font Unicode tidak ditemukan. Karakter non-Latin mungkin tidak tampil.")
+            logger.info("-> Peringatan: font Unicode tidak ditemukan. Karakter non-Latin mungkin tidak tampil.")
 
         pdf.add_page()
 
@@ -2437,11 +2466,11 @@ def export_pdf(teks, nama_file=None, judul="Dokumen"):
             pdf.ln(2)  # spasi antar baris
 
         pdf.output(nama_file)
-        print(f"-> PDF berhasil dibuat: {nama_file}")
+        logger.info(f"-> PDF berhasil dibuat: {nama_file}")
         return nama_file
 
     except Exception as e:
-        print(f"-> Gagal membuat PDF: {e}")
+        logger.info(f"-> Gagal membuat PDF: {e}")
         return None
 
 
@@ -2501,7 +2530,7 @@ def kirim_email_resend(penerima, subjek, isi):
     except Exception as e:
         raise SystemExit(f"\nERROR saat mengirim email via Resend: {e}") from e
 
-    print(f"-> Email terkirim ke {', '.join(penerima)} (id: {hasil.get('id', '?')})")
+    logger.info(f"-> Email terkirim ke {', '.join(penerima)} (id: {hasil.get('id', '?')})")
 
 
 # ==========================================
@@ -2681,14 +2710,14 @@ def main():
     # Muat pengaturan default rapat dari konfigurasi.json (jika ada)
     konfig = muat_konfigurasi()
     if konfig:
-        print("[INFO] Pengaturan default dimuat dari 'konfigurasi.json'")
+        logger.info("[INFO] Pengaturan default dimuat dari 'konfigurasi.json'")
     cfg = terapkan_konfigurasi(args, konfig)
 
     # Override beam_size ke global jika user meng-override via CLI
     global WHISPER_BEAM_SIZE
     if args.beam_size is not None:
         WHISPER_BEAM_SIZE = args.beam_size
-        print(f"[INFO] Beam size diubah ke {WHISPER_BEAM_SIZE} (dari --beam-size)")
+        logger.info(f"[INFO] Beam size diubah ke {WHISPER_BEAM_SIZE} (dari --beam-size)")
 
     if args.perangkat is not None and cfg["sumber"] != "loopback":
         raise SystemExit("\nERROR: opsi --perangkat hanya berlaku dengan --sumber loopback.")
@@ -2710,7 +2739,7 @@ def main():
             # Jika ada file audio, transkripsi dulu lalu cari
             if not os.path.isfile(args.audio):
                 raise SystemExit(f"\nERROR: file audio tidak ditemukan: {args.audio}")
-            print(f"[INFO] Transkripsi audio dulu, lalu cari: {args.audio}")
+            logger.info(f"[INFO] Transkripsi audio dulu, lalu cari: {args.audio}")
             transkrip_teks = transkripsi_audio(args.audio, cfg["bahasa"], cfg["engine"],
                                                konteks=cfg["konteks"])
         else:
@@ -2756,12 +2785,12 @@ def main():
         jalur_transkrip = args.transkrip
         if not os.path.isfile(jalur_transkrip):
             raise SystemExit(f"\nERROR: file transkrip tidak ditemukan: {jalur_transkrip}")
-        print(f"[INFO] Mode regenerasi notulen dari transkrip: {jalur_transkrip}")
+        logger.info(f"[INFO] Mode regenerasi notulen dari transkrip: {jalur_transkrip}")
         with open(jalur_transkrip, "r", encoding="utf-8") as f:
             transkrip_teks = f.read()
         if not transkrip_teks.strip():
             raise SystemExit("\nERROR: file transkrip kosong.")
-        print(f"-> Transkrip dimuat: {len(transkrip_teks)} karakter")
+        logger.info(f"-> Transkrip dimuat: {len(transkrip_teks)} karakter")
 
         # Normalisasi daftar peserta
         daftar_peserta = None
@@ -2798,9 +2827,9 @@ def main():
                 "  Cek ulang Action Items pada notulen sebelum disebarluaskan.\n"
             )
 
-        print("\n==========================================")
-        print("            HASIL NOTULEN RAPAT           ")
-        print("==========================================")
+        logger.info("\n==========================================")
+        logger.info("            HASIL NOTULEN RAPAT           ")
+        logger.info("==========================================")
         print(notulen)
 
         simpan_notulen(notulen, os.path.join(DIR_NOTULEN, f"Notulen_Rapat_{timestamp}"), cfg["format"])
@@ -2831,12 +2860,12 @@ def main():
         audio_file = unduh_audio_youtube(args.youtube)
         if not audio_file or not os.path.isfile(audio_file):
             raise SystemExit("\nERROR: gagal mengunduh audio dari YouTube.")
-        print(f"[0/3] Audio YouTube siap diproses: {audio_file}")
+        logger.info(f"[0/3] Audio YouTube siap diproses: {audio_file}")
     elif args.audio:
         audio_file = args.audio
         if not os.path.isfile(audio_file):
             raise SystemExit(f"\nERROR: file audio tidak ditemukan: {audio_file}")
-        print(f"[0/3] Menggunakan file audio yang sudah ada: {audio_file}")
+        logger.info(f"[0/3] Menggunakan file audio yang sudah ada: {audio_file}")
     else:
         audio_file = os.path.join(DIR_REKAMAN, f"rekaman_zoom_{timestamp}.wav")
         peringatan = peringatan_durasi_panjang(cfg["durasi"])
@@ -2861,7 +2890,7 @@ def main():
         if jalur_flac:
             # Ganti audio_file ke FLAC untuk transkripsi
             audio_file = jalur_flac
-            print(f"-> File FLAC siap untuk transkripsi: {jalur_flac}")
+            logger.info(f"-> File FLAC siap untuk transkripsi: {jalur_flac}")
 
     # Deteksi rekaman hampir sunyi SEBELUM transkripsi (hemat waktu & kuota)
     rms = ukur_rms(audio_file)
@@ -2911,7 +2940,7 @@ def main():
         nama_translate = os.path.join(DIR_TRANSLATE, f"Transkrip_{timestamp}")
         simpan_translate(teks_translate, nama_translate, cfg["translate"])
 
-    print("\n--- HASIL TRANSKRIP RAW ---")
+    logger.info("\n--- HASIL TRANSKRIP RAW ---")
     print(transkrip_teks)
 
     # Normalisasi daftar peserta (pisah koma, buang spasi berlebih & kosong)
@@ -2942,9 +2971,9 @@ def main():
             "  Cek ulang Action Items pada notulen sebelum disebarluaskan.\n"
         )
 
-    print("\n==========================================")
-    print("            HASIL NOTULEN RAPAT           ")
-    print("==========================================")
+    logger.info("\n==========================================")
+    logger.info("            HASIL NOTULEN RAPAT           ")
+    logger.info("==========================================")
     print(notulen)
 
     # Simpan notulen ke file sesuai format yang diminta
