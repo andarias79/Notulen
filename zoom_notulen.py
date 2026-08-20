@@ -574,13 +574,21 @@ def _resample_ke_16khz(nama_file, rate_asli, kanal_asli):
         # Stereo/multi-kanal -> mono (rata-rata semua kanal)
         if len(data.shape) > 1 and data.shape[1] > 1:
             data = data.mean(axis=1)
-        # Resample ke 16 kHz
+        # Resample ke 16 kHz dengan anti-aliasing filter
         if rate_asli != SAMPLE_RATE:
-            jumlah_baru = int(len(data) * SAMPLE_RATE / rate_asli)
-            # Gunakan interpolasi linear sederhana (cukup untuk speech)
-            indeks_asli = np.arange(len(data))
-            indeks_baru = np.linspace(0, len(data) - 1, jumlah_baru)
-            data = np.interp(indeks_baru, indeks_asli, data)
+            try:
+                from scipy.signal import resample_poly
+                from math import gcd
+                # resample_poly menerapkan low-pass filter sebelum downsampling
+                # -> mencegah aliasing yang bisa merusak akurasi transkripsi
+                faktor = gcd(rate_asli, SAMPLE_RATE)
+                data = resample_poly(data, SAMPLE_RATE // faktor, rate_asli // faktor)
+            except ImportError:
+                # Fallback ke interpolasi linear jika scipy tidak terinstal
+                jumlah_baru = int(len(data) * SAMPLE_RATE / rate_asli)
+                indeks_asli = np.arange(len(data))
+                indeks_baru = np.linspace(0, len(data) - 1, jumlah_baru)
+                data = np.interp(indeks_baru, indeks_asli, data)
         # Simpan sebagai WAV 16-bit
         data_int16 = (data * 32767).clip(-32768, 32767).astype(np.int16)
         fd, jalur = tempfile.mkstemp(suffix="_16khz.wav")

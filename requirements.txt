@@ -6,6 +6,7 @@ numpy==2.4.0
 PyAudioWPatch==0.2.12.8
 python-dotenv==1.2.2
 resend==2.35.0
+scipy>=1.11.0
 sounddevice==0.5.5
 soundfile==0.14.0
 streamlit>=1.30.0
