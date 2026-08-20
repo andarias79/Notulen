@@ -1192,6 +1192,10 @@ class TestPeringatanDurasiPanjang(unittest.TestCase):
 class TestTranskripsi(unittest.TestCase):
     """Tes transkripsi_audio (faster-whisper): bahasa eksplisit vs 'auto', timestamp."""
 
+    def setUp(self):
+        # Bersihkan cache model agar mock object tidak bocor antar test
+        zoom_notulen._whisper_cache = {"model": None, "nama": None}
+
     @staticmethod
     def _segmen_palsu(daftar, bahasa="id"):
         """Mengubah [(start, end, teks), ...] menjadi (generator segmen, info)."""
