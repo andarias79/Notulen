@@ -1099,6 +1099,24 @@ def transkripsi_audio(nama_file, bahasa, engine="lokal", konteks=None, no_vad=Fa
     return transkripsi_audio_lokal(nama_file, bahasa, konteks=konteks, no_vad=no_vad)
 
 
+# ── Singleton cache untuk WhisperModel ──
+# Model large-v3-turbo (~3.1 GB) memakan 30-60 detik untuk loading ke RAM.
+# Dengan cache, model hanya di-load sekali dan dipakai ulang untuk semua
+# transkripsi berikutnya (terutama penting untuk batch processing).
+_whisper_cache = {"model": None, "nama": None}
+
+
+def _dapatkan_whisper_model(nama_model=WHISPER_MODEL):
+    """Mengembalikan WhisperModel yang di-cache (singleton). Load hanya sekali."""
+    if _whisper_cache["model"] is None or _whisper_cache["nama"] != nama_model:
+        print(f"      (memuat model '{nama_model}' ke RAM — proses pertama kali mungkin lambat)")
+        _whisper_cache["model"] = WhisperModel(nama_model, device="cpu", compute_type="int8")
+        _whisper_cache["nama"] = nama_model
+    else:
+        print(f"      (model '{nama_model}' sudah di-cache — skip loading)")
+    return _whisper_cache["model"]
+
+
 def transkripsi_audio_lokal(nama_file, bahasa, konteks=None, no_vad=False):
     """Mengubah file audio menjadi teks menggunakan faster-whisper (CTranslate2 + INT8).
 
@@ -1126,7 +1144,7 @@ def transkripsi_audio_lokal(nama_file, bahasa, konteks=None, no_vad=False):
         print("      ⚠️ VAD dinonaktifkan (--no-vad). Semua bagian audio akan diproses.")
 
     try:
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+        model = _dapatkan_whisper_model(WHISPER_MODEL)
         opsi_transkrip = {
             "language": bahasa if bahasa != "auto" else None,
             "beam_size": WHISPER_BEAM_SIZE,
