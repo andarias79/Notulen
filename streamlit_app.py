@@ -217,7 +217,8 @@ def get_daftar_engine():
 
 
 def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
-                 notulen_mode="multi", subtitle="none", translate=None, pdf=False):
+                 notulen_mode="multi", subtitle="none", translate=None, pdf=False,
+                 konteks=None, noise_reduce=False, beam_size=3, no_vad=False, email=None):
     """Fungsi utama untuk memproses audio."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -226,6 +227,15 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
     DIR_NOTULEN = "Hasil_Notulen"
     os.makedirs(DIR_TRANSKRIP, exist_ok=True)
     os.makedirs(DIR_NOTULEN, exist_ok=True)
+
+    # 0. Noise Reduction
+    if noise_reduce:
+        with st.status("🎧 Mengurangi noise audio...", expanded=True) as status:
+            try:
+                audio_path = zoom_notulen.kurangi_noise(audio_path)
+                status.update(label="✅ Noise reduction selesai!", state="complete")
+            except Exception as e:
+                status.update(label="⚠️ Gagal mengurangi noise", state="warning")
 
     # 1. Transkripsi
     with st.status("📝 Memproses transkripsi...", expanded=True) as status:
@@ -238,8 +248,11 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
             progress_bar.progress(p, text=f"Transkripsi berjalan... {int(p*100)}%")
 
         try:
+            zoom_notulen.WHISPER_BEAM_SIZE = beam_size
             transkrip_teks = zoom_notulen.transkripsi_audio(
                 audio_path, bahasa, engine,
+                konteks=konteks if konteks else None,
+                no_vad=no_vad,
                 progress_callback=update_progress if engine == "lokal" else None
             )
             progress_bar.progress(1.0, text="Selesai!")
@@ -321,6 +334,24 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
             except Exception as e:
                 status.update(label="⚠️ PDF gagal", state="warning")
 
+    # 6. Email (opsional)
+    if email:
+        with st.status("📧 Mengirim email...", expanded=True) as status:
+            try:
+                daftar_email = [e.strip() for e in email.split(",") if '@' in e]
+                if daftar_email:
+                    zoom_notulen.kirim_email_resend(
+                        daftar_email, 
+                        nama_notulen, 
+                        nama_transkrip if 'nama_transkrip' in locals() and os.path.exists(nama_transkrip) else None
+                    )
+                    status.update(label="✅ Email terkirim!", state="complete")
+                else:
+                    status.update(label="⚠️ Format email tidak valid", state="warning")
+            except Exception as e:
+                status.update(label="⚠️ Gagal mengirim email", state="warning")
+                st.error(str(e))
+
     return transkrip_teks, notulen, None
 
 
@@ -393,6 +424,23 @@ with st.sidebar:
 
     export_pdf = st.checkbox("Export ke PDF", value=False)
 
+    # CLI Options
+    st.subheader("⚙️ Opsi Lanjutan")
+    konteks = st.text_area(
+        "Konteks / Istilah Medis / Judul",
+        placeholder="Kemenkes, RSUD, BPJS...",
+        help="Sangat membantu Whisper mengenali singkatan teknis. (Paling efektif di mode engine Lokal)"
+    )
+    noise_reduce = st.checkbox("Kurangi Noise (Lama)", value=False, help="Memfilter decitan background (memakan memori)")
+    
+    col_a, col_b = st.columns(2)
+    with col_a:
+        beam_size = st.number_input("Beam Size", min_value=1, max_value=10, value=3, help="Kecepatan vs Akurasi (Hanya Lokal)")
+    with col_b:
+        no_vad = st.checkbox("Matikan VAD", value=False, help="Transkripsi paksa saat hening (jangan centang jika tidak perlu).")
+        
+    email = st.text_input("Kirim via Email", placeholder="email1@gmail.com, email2@...", help="Pisahkan dengan koma")
+
 
 # ==========================================
 # MAIN CONTENT
@@ -401,8 +449,9 @@ st.markdown('<h1 class="main-header">📝 Notulen Rapat Zoom</h1>', unsafe_allow
 st.markdown("---")
 
 # Tab utama
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab_yt, tab2, tab3, tab4 = st.tabs([
     "📁 Upload Audio/Video",
+    "🔗 Proses URL (YouTube)",
     "🎙️ Rekam Audio",
     "📊 Hasil",
     "ℹ️ Bantuan",
@@ -449,6 +498,11 @@ with tab1:
                 subtitle=subtitle,
                 translate=translate,
                 pdf=export_pdf,
+                konteks=konteks,
+                noise_reduce=noise_reduce,
+                beam_size=beam_size,
+                no_vad=no_vad,
+                email=email,
             )
 
             if error:
@@ -457,6 +511,73 @@ with tab1:
                 st.session_state.transkrip = transkrip
                 st.session_state.notulen = notulen
                 st.success("✅ Proses selesai! Lihat tab 'Hasil' untuk melihat hasilnya.")
+
+
+# ==========================================
+# TAB YT: PROSES URL (YOUTUBE)
+# ==========================================
+with tab_yt:
+    st.header("🔗 Proses URL (YouTube, dll)")
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        yt_url = st.text_input(
+            "Masukkan URL Video/Audio", 
+            placeholder="Contoh: https://www.youtube.com/watch?v=..."
+        )
+        st.info("💡 Aplikasi akan otomatis mengekstrak audio dari URL di atas.")
+    with col2:
+        judul_yt = st.text_input("Judul Rapat (opsional)", placeholder="Contoh: Rapat Mingguan Tim", key="judul_yt")
+        peserta_yt = st.text_input("Daftar Peserta (opsional)", placeholder="Budi, Siti, Andi", key="peserta_yt")
+
+    if st.button("🚀 Unduh & Proses Sekarang", type="primary", use_container_width=True, key="btn_yt"):
+        if not yt_url:
+            st.warning("⚠️ Silakan masukkan URL terlebih dahulu!")
+        else:
+            with st.status("📥 Mengunduh audio...", expanded=True) as status_yt:
+                st.write(f"Mengekstrak dari: {yt_url}")
+                try:
+                    # Buat nama temporary file
+                    fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+                    os.close(fd)
+                    
+                    st.write("Proses unduhan dengan yt-dlp sedang berlangsung...")
+                    tmp_path = zoom_notulen.unduh_audio_youtube(yt_url, tmp_path)
+                    
+                    status_yt.update(label="✅ Unduhan audio selesai!", state="complete")
+                    
+                    # Set ke session state
+                    st.session_state.audio_file = tmp_path
+                except Exception as e:
+                    status_yt.update(label="❌ Gagal mengunduh", state="error")
+                    st.error(f"Error: {e}")
+                    tmp_path = None
+            
+            # Jika unduhan sukses, lanjut ke proses transkripsi
+            if tmp_path:
+                transkrip, notulen, error = proses_audio(
+                    tmp_path,
+                    bahasa,
+                    engine,
+                    judul=judul_yt or None,
+                    daftar_peserta=peserta_yt or None,
+                    notulen_mode=notulen_mode,
+                    subtitle=subtitle,
+                    translate=translate,
+                    pdf=export_pdf,
+                    konteks=konteks,
+                    noise_reduce=noise_reduce,
+                    beam_size=beam_size,
+                    no_vad=no_vad,
+                    email=email,
+                )
+
+                if error:
+                    st.error(f"❌ Error: {error}")
+                else:
+                    st.session_state.transkrip = transkrip
+                    st.session_state.notulen = notulen
+                    st.success("✅ Proses selesai! Lihat tab 'Hasil' untuk melihat hasilnya.")
 
 
 # ==========================================
@@ -530,6 +651,11 @@ with tab2:
                     subtitle=subtitle,
                     translate=translate,
                     pdf=export_pdf,
+                    konteks=konteks,
+                    noise_reduce=noise_reduce,
+                    beam_size=beam_size,
+                    no_vad=no_vad,
+                    email=email,
                 )
                 if error:
                     st.error(f"❌ Error: {error}")
