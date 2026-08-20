@@ -65,7 +65,7 @@ def aktifkan_utf8_stdout():
 # Memuat variabel dari file .env (API key TIDAK disimpan di source code)
 load_dotenv()
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 if not GEMINI_API_KEY:
     raise SystemExit(
         "\nERROR: GEMINI_API_KEY tidak ditemukan.\n"
@@ -98,7 +98,7 @@ GEMINI_TUNGGU_FILE_DETIK = 600       # waktu tunggu maksimal file diproses di se
 # setara large-v3 tapi 3-4x lebih cepat (809M vs 1.55B parameter).
 # Download pertama ~3.1 GB, setelahnya di-cache.
 WHISPER_MODEL = "large-v3-turbo"
-WHISPER_BEAM_SIZE = 5   # beam search; 4-8 = sweet-spot kecepatan/akurasi di CTranslate2
+WHISPER_BEAM_SIZE = 3   # beam search; 3 = sweet-spot kecepatan di CPU i3 (5 = default CTranslate2)
 WHISPER_VAD = True      # lewati bagian sunyi (silero VAD) -> lebih cepat & hasil lebih rapi
 WHISPER_VAD_THOLD = 0.5  # threshold VAD: 0.5 = default (lebih toleran dari 0.35)
 SAMPLE_RATE = 16000     # 16 kHz mono = standar Whisper -> file 4x lebih kecil dari 44.1 kHz stereo
@@ -2652,6 +2652,11 @@ def buat_parser():
         help="Mode pembuatan notulen: 'multi' = 2-pass (ekstrak fakta lalu susun notulen, "
              "lebih akurat, default); 'single' = 1-pass langsung (lebih cepat)."
     )
+    parser.add_argument(
+        "--beam-size", type=int, default=None,
+        help=f"Beam size untuk transkripsi lokal (default: {WHISPER_BEAM_SIZE}). "
+             "Nilai kecil (2-3) = lebih cepat; nilai besar (5-8) = lebih akurat."
+    )
     return parser
 
 
@@ -2678,6 +2683,12 @@ def main():
     if konfig:
         print("[INFO] Pengaturan default dimuat dari 'konfigurasi.json'")
     cfg = terapkan_konfigurasi(args, konfig)
+
+    # Override beam_size ke global jika user meng-override via CLI
+    global WHISPER_BEAM_SIZE
+    if args.beam_size is not None:
+        WHISPER_BEAM_SIZE = args.beam_size
+        print(f"[INFO] Beam size diubah ke {WHISPER_BEAM_SIZE} (dari --beam-size)")
 
     if args.perangkat is not None and cfg["sumber"] != "loopback":
         raise SystemExit("\nERROR: opsi --perangkat hanya berlaku dengan --sumber loopback.")
