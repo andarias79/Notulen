@@ -435,19 +435,26 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
                         "\nERROR: perangkat loopback WASAPI tidak ditemukan. Coba --list-devices."
                     )
 
-        # SELALU rekam di 16 kHz mono untuk efisiensi (file 6x lebih kecil)
-        # WASAPI loopback mendukung resampling otomatis
-        channels_rekam = KANAL_REKAM  # mono
-        sample_rate_rekam = SAMPLE_RATE  # 16 kHz
+        # Rekam di format asli perangkat (native sample rate & kanal),
+        # lalu resample ke 16 kHz mono setelah selesai.
+        # WASAPI loopback TIDAK selalu mendukung resampling otomatis -
+        # banyak driver hanya menerima sample rate asli perangkat.
+        channels_rekam = device["maxInputChannels"] or KANAL_REKAM
+        sample_rate_rekam = int(device["defaultSampleRate"])
         chunk = 1024
+        sudah_resample = False  # menandakan apakah perlu resample di akhir
         print(f"-> Merekam dari: {device['name']}")
-        print(f"      Format: {sample_rate_rekam} Hz mono (hemat ruang disk)")
+        if sample_rate_rekam != SAMPLE_RATE or channels_rekam != KANAL_REKAM:
+            print(f"      Format asli: {sample_rate_rekam} Hz, {channels_rekam} ch")
+            print(f"      (akan di-resample ke {SAMPLE_RATE} Hz mono setelah perekaman)")
+            sudah_resample = True
+        else:
+            print(f"      Format: {sample_rate_rekam} Hz mono")
         print(f"      Tekan '{TOMBOL_HENTI}' = stop | '{TOMBOL_PAUSE}' = pause/resume")
 
         try:
-            # Catatan: perangkat loopback sudah menjadi perangkat input WASAPI,
-            # jadi cukup pilih via input_device_index (tanpa argumen as_loopback).
-            # WASAPI akan melakukan resampling otomatis ke sample rate yang diminta.
+            # Rekam di format native perangkat - WASAPI hanya menerima
+            # sample rate yang didukung oleh perangkat output.
             stream = p.open(
                 format=pyaudio.paInt16,
                 channels=channels_rekam,
@@ -528,6 +535,28 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
             f"-> Perekaman dihentikan lebih awal setelah {durasi_aktual:.1f} detik. "
             "Audio tetap disimpan & akan diproses."
         )
+
+    # Resample ke 16 kHz mono (standar Whisper) jika format asli berbeda
+    if sudah_resample and os.path.isfile(nama_file):
+        print(f"-> Resample dari {sample_rate_rekam} Hz {channels_rekam}ch ke {SAMPLE_RATE} Hz mono...")
+        jalur_16khz = _resample_ke_16khz(nama_file, sample_rate_rekam, channels_rekam)
+        if jalur_16khz and os.path.isfile(jalur_16khz):
+            # Ganti file asli dengan hasil resample
+            try:
+                import shutil
+                shutil.move(jalur_16khz, nama_file)
+            except Exception as e:
+                print(f"-> Peringatan: gagal mengganti file ({e}). File asli tetap dipakai.")
+                # Hapus file resample yang gagal dipindah
+                try:
+                    os.remove(jalur_16khz)
+                except OSError:
+                    pass
+            else:
+                print(f"-> Resample selesai: {nama_file}")
+        else:
+            print(f"-> Resample gagal, menggunakan file asli ({sample_rate_rekam} Hz {channels_rekam}ch)")
+
     print(f"-> Perekaman selesai. File disimpan sebagai: {nama_file}")
     return durasi_aktual
 
