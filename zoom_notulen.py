@@ -596,10 +596,12 @@ def _resample_ke_16khz(nama_file, rate_asli, kanal_asli):
         return None
 
 
-def kompres_wav_ke_flac(nama_file):
-    """Mengompres file WAV ke FLAC (lossless compression).
+def kompres_wav_ke_flac(nama_file, jalur_output=None):
+    """Mengompres file WAV ke FLAC (lossless compression) secara chunked.
 
-    FLAC mengurangi ukuran file ~50-60% tanpa kehilangan kualitas.
+    Membaca audio per chunk (1M frames) agar tidak memuat seluruh file ke RAM
+    untuk file besar (mis. 1+ GB dari loopback). FLAC mengurangi ukuran ~50-60%.
+    jalur_output: path file FLAC output (default: same directory as input, ganti ekstensi).
     Mengembalikan path file FLAC, atau None jika gagal.
     """
     try:
@@ -612,17 +614,27 @@ def kompres_wav_ke_flac(nama_file):
         print("-> Peringatan: file bukan WAV. Lewati kompresi FLAC.")
         return None
 
-    jalur_flac = nama_file[:-4] + ".flac"
+    if jalur_output is None:
+        jalur_output = nama_file[:-4] + ".flac"
     ukuran_wav = os.path.getsize(nama_file)
 
     print(f"-> Mengompres WAV ke FLAC...")
     try:
-        data, samplerate = sf.read(nama_file, dtype="int16")
-        sf.write(jalur_flac, data, samplerate, format="FLAC", subtype="PCM_16")
-        ukuran_flac = os.path.getsize(jalur_flac)
+        CHUNK_FRAMES = 1024 * 1024  # ~1M frames per chunk
+        with sf.SoundFile(nama_file, "r") as src:
+            with sf.SoundFile(
+                jalur_output, "w", samplerate=src.samplerate,
+                channels=src.channels, format="FLAC", subtype="PCM_16"
+            ) as dst:
+                while True:
+                    data = src.read(CHUNK_FRAMES, dtype="int16")
+                    if len(data) == 0:
+                        break
+                    dst.write(data)
+        ukuran_flac = os.path.getsize(jalur_output)
         pengurangan = (1 - ukuran_flac / ukuran_wav) * 100
         print(f"   WAV: {ukuran_wav / 1024 / 1024:.1f} MB -> FLAC: {ukuran_flac / 1024 / 1024:.1f} MB ({pengurangan:.0%} lebih kecil)")
-        return jalur_flac
+        return jalur_output
     except Exception as e:
         print(f"-> Peringatan: gagal kompresi FLAC ({e}). Menggunakan file WAV.")
         return None
@@ -1182,29 +1194,19 @@ def _durasi_audio(nama_file):
 def _kompres_ke_flac(nama_file):
     """Mengompres WAV menjadi FLAC sementara (jauh lebih kecil -> upload lebih cepat).
 
-    Membaca audio per chunk (64 MB) agar tidak memuat seluruh file ke RAM
-    untuk file besar (mis. 1+ GB dari loopback). Mengembalikan path file FLAC
-    temp, atau None jika gagal.
+    Mengembalikan path file FLAC temp, atau None jika gagal.
     """
+    fd, jalur = tempfile.mkstemp(suffix=".flac")
+    os.close(fd)
+    hasil = kompres_wav_ke_flac(nama_file, jalur_output=jalur)
+    if hasil:
+        return hasil
+    # Bersihkan file kosong jika gagal
     try:
-        import soundfile as sf
-        info = sf.info(nama_file)
-        fd, jalur = tempfile.mkstemp(suffix=".flac")
-        os.close(fd)
-        CHUNK_FRAMES = 1024 * 1024  # ~1M frames per chunk
-        with sf.SoundFile(nama_file, "r") as src:
-            with sf.SoundFile(
-                jalur, "w", samplerate=src.samplerate,
-                channels=src.channels, format="FLAC", subtype="PCM_16"
-            ) as dst:
-                while True:
-                    data = src.read(CHUNK_FRAMES, dtype="int16")
-                    if len(data) == 0:
-                        break
-                    dst.write(data)
-        return jalur
-    except Exception:
-        return None
+        os.remove(jalur)
+    except OSError:
+        pass
+    return None
 
 
 def _potong_audio(nama_file, mulai_detik, durasi_detik):
@@ -2293,6 +2295,33 @@ def simpan_hasil_search(hasil, kata_kunci, nama_file=None):
 # ==========================================
 # 6e. FUNGSI EXPORT KE PDF
 # ==========================================
+# 6e. FUNGSI EXPORT KE PDF
+# ==========================================
+def _cari_font_unicode():
+    """Mencari file font TTF yang mendukung Unicode di sistem.
+
+    Mengembalikan path file font, atau None jika tidak ditemukan.
+    Prioritas: DejaVuSans > NotoSans > LiberationSans > Arial.
+    """
+    # Daftar font Unicode umum di Windows dan Linux
+    kandidat = [
+        # Windows
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "DejaVuSans.ttf"),
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "DejaVuSans-Bold.ttf"),
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "arial.ttf"),
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "arialuni.ttf"),
+        # Linux
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    ]
+    for jalur in kandidat:
+        if os.path.isfile(jalur):
+            return jalur
+    return None
+
+
 def export_pdf(teks, nama_file=None, judul="Dokumen"):
     """Mengubah teks (transkrip/notulen) menjadi file PDF.
 
@@ -2320,21 +2349,36 @@ def export_pdf(teks, nama_file=None, judul="Dokumen"):
         pdf = FPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
 
-        # Gunakan font bawaan fpdf2 (Helvetica) - tidak perlu file font
+        # Coba gunakan font Unicode (DejaVuSans) agar karakter non-Latin
+        # (huruf Indonesia berdiakritik, CJK, dll.) tampil dengan benar.
+        font_unicode = _cari_font_unicode()
+        if font_unicode:
+            pdf.add_font("Unicode", "", font_unicode, uni=True)
+            # Cari font bold jika tersedia
+            font_bold = font_unicode.replace("Regular", "Bold").replace(".ttf", "-Bold.ttf")
+            if not os.path.isfile(font_bold):
+                font_bold = font_unicode  # fallback ke regular
+            pdf.add_font("Unicode", "B", font_bold, uni=True)
+            nama_font = "Unicode"
+        else:
+            # Fallback ke Helvetica (tidak support Unicode penuh)
+            nama_font = "Helvetica"
+            print("-> Peringatan: font Unicode tidak ditemukan. Karakter non-Latin mungkin tidak tampil.")
+
         pdf.add_page()
 
         # Judul
-        pdf.set_font("Helvetica", "B", 16)
+        pdf.set_font(nama_font, "B", 16)
         pdf.cell(0, 10, judul, ln=True, align="C")
         pdf.ln(5)
 
         # Tanggal cetak
-        pdf.set_font("Helvetica", "", 9)
+        pdf.set_font(nama_font, "", 9)
         pdf.cell(0, 8, f"Dicetak: {datetime.now().strftime('%d %B %Y %H:%M')}", ln=True, align="R")
         pdf.ln(5)
 
         # Isi konten
-        pdf.set_font("Helvetica", "", 11)
+        pdf.set_font(nama_font, "", 11)
         for baris in teks.splitlines():
             baris_strip = baris.strip()
             if not baris_strip:
@@ -2343,24 +2387,24 @@ def export_pdf(teks, nama_file=None, judul="Dokumen"):
 
             # Cek apakah ini heading (mulai dengan #)
             if baris_strip.startswith("# "):
-                pdf.set_font("Helvetica", "B", 14)
+                pdf.set_font(nama_font, "B", 14)
                 pdf.multi_cell(0, 8, baris_strip.lstrip("# "))
-                pdf.set_font("Helvetica", "", 11)
+                pdf.set_font(nama_font, "", 11)
             elif baris_strip.startswith("## "):
-                pdf.set_font("Helvetica", "B", 12)
+                pdf.set_font(nama_font, "B", 12)
                 pdf.multi_cell(0, 7, baris_strip.lstrip("# ").strip())
-                pdf.set_font("Helvetica", "", 11)
+                pdf.set_font(nama_font, "", 11)
             elif baris_strip.startswith("### "):
-                pdf.set_font("Helvetica", "B", 11)
+                pdf.set_font(nama_font, "B", 11)
                 pdf.multi_cell(0, 7, baris_strip.lstrip("# ").strip())
-                pdf.set_font("Helvetica", "", 11)
+                pdf.set_font(nama_font, "", 11)
             # Cek apakah ini timestamp [MM:SS]
             elif re.match(r"^\[\d{1,2}:\d{2}", baris_strip):
-                pdf.set_font("Helvetica", "", 10)
+                pdf.set_font(nama_font, "", 10)
                 pdf.set_text_color(100, 100, 100)  # abu-abu untuk timestamp
                 pdf.multi_cell(0, 6, baris_strip)
                 pdf.set_text_color(0, 0, 0)  # kembali ke hitam
-                pdf.set_font("Helvetica", "", 11)
+                pdf.set_font(nama_font, "", 11)
             else:
                 pdf.multi_cell(0, 6, baris_strip)
 

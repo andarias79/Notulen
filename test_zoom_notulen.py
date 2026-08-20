@@ -991,6 +991,181 @@ class TestRekamMic(unittest.TestCase):
         self.assertFalse(berhenti.is_set())
 
 
+class TestRekamLoopback(unittest.TestCase):
+    """Tes rekam_audio_loopback: perekaman WASAPI loopback + resample otomatis."""
+
+    def _buat_pyaudio_palsu(self, native_rate, native_ch, stream_palsu=None, error_open=False):
+        """Membuat modul pyaudiowpatch palsu dengan context manager yang benar."""
+        device = {
+            "index": 0,
+            "name": "Speakers [Loopback]",
+            "maxInputChannels": native_ch,
+            "defaultSampleRate": native_rate,
+            "isLoopbackDevice": True,
+        }
+
+        class PyAudioPalsu:
+            paWASAPI = "WASAPI"
+            paInt16 = "paInt16"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+            def get_host_api_info_by_type(self, api_type):
+                return {"defaultOutputDevice": 0}
+
+            def get_device_info_by_index(self, idx):
+                return device
+
+            def get_loopback_device_info_generator(self):
+                return [device]
+
+            def get_sample_size(self, fmt):
+                return 2
+
+            def open(self, **kwargs):
+                if error_open:
+                    raise OSError("Invalid sample rate")
+                return stream_palsu
+
+        class PyAudioModule:
+            """Modul palsu yang mengembalikan PyAudioPalsu saat dipanggil."""
+            paWASAPI = "WASAPI"
+            paInt16 = "paInt16"
+
+            def PyAudio(self):
+                return PyAudioPalsu()
+
+        return PyAudioModule()
+
+    def test_rekam_loopback_merekam_di_native_rate_lalu_resample(self):
+        """Rekam di native rate perangkat, lalu resample ke 16kHz mono."""
+        import wave as wavemod
+
+        native_rate = 48000
+        native_ch = 2
+        frame_bytes = 2 * native_ch  # int16 stereo
+        total_frames = int(1 * native_rate)  # 1 detik
+
+        class StreamPalsu:
+            def __init__(self):
+                self.dibaca = 0
+            def read(self, n, exception_on_overflow=False):
+                n = min(n, total_frames - self.dibaca)
+                if n <= 0:
+                    return b""
+                self.dibaca += n
+                return b"\x00" * (n * frame_bytes)
+            def stop_stream(self):
+                pass
+            def close(self):
+                pass
+
+        pyaudio_mod = self._buat_pyaudio_palsu(native_rate, native_ch, StreamPalsu())
+
+        # Patch soundfile untuk resample
+        import numpy as np
+        sf_palsu = mock.MagicMock()
+        data_palsu = np.random.randn(48000, 2).astype(np.float32) * 0.1
+        sf_palsu.read.return_value = (data_palsu, 48000)
+        sf_palsu.info.return_value = mock.MagicMock(samplerate=48000, channels=2)
+
+        with mock.patch.dict(sys.modules, {"pyaudiowpatch": pyaudio_mod, "soundfile": sf_palsu}), \
+             mock.patch.object(zoom_notulen, "_rekam_berhenti_dengan_pause", return_value=(threading.Event(), threading.Event())), \
+             tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "loopback.wav")
+            durasi = zoom_notulen.rekam_audio_loopback(1, path)
+            self.assertTrue(os.path.isfile(path))
+            with wavemod.open(path, "rb") as wf:
+                self.assertEqual(wf.getframerate(), zoom_notulen.SAMPLE_RATE)
+                self.assertEqual(wf.getnchannels(), zoom_notulen.KANAL_REKAM)
+
+    def test_rekam_loopback_native_rate_sudah_16khz_tanpa_resample(self):
+        """Jika native rate sudah 16kHz mono, tidak perlu resample."""
+        native_rate = 16000
+        native_ch = 1
+        frame_bytes = 2 * native_ch
+        total_frames = int(1 * native_rate)
+
+        class StreamPalsu:
+            def __init__(self):
+                self.dibaca = 0
+            def read(self, n, exception_on_overflow=False):
+                n = min(n, total_frames - self.dibaca)
+                if n <= 0:
+                    return b""
+                self.dibaca += n
+                return b"\x00" * (n * frame_bytes)
+            def stop_stream(self):
+                pass
+            def close(self):
+                pass
+
+        pyaudio_mod = self._buat_pyaudio_palsu(native_rate, native_ch, StreamPalsu())
+
+        with mock.patch.dict(sys.modules, {"pyaudiowpatch": pyaudio_mod}), \
+             mock.patch.object(zoom_notulen, "_rekam_berhenti_dengan_pause", return_value=(threading.Event(), threading.Event())), \
+             mock.patch.object(zoom_notulen, "_resample_ke_16khz") as resample_mock, \
+             tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "loopback.wav")
+            zoom_notulen.rekam_audio_loopback(1, path)
+            resample_mock.assert_not_called()
+
+    def test_rekam_loopback_gagal_buka_stream_systemexit(self):
+        """Gagal membuka stream loopback -> SystemExit dengan pesan jelas."""
+        pyaudio_mod = self._buat_pyaudio_palsu(48000, 2, error_open=True)
+
+        with mock.patch.dict(sys.modules, {"pyaudiowpatch": pyaudio_mod}), \
+             mock.patch.object(zoom_notulen, "_rekam_berhenti_dengan_pause", return_value=(threading.Event(), threading.Event())), \
+             tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit):
+                zoom_notulen.rekam_audio_loopback(1, os.path.join(d, "x.wav"))
+
+
+class TestResampleKe16khz(unittest.TestCase):
+    """Tes _resample_ke_16khz: konversi audio ke 16kHz mono."""
+
+    def test_resample_stereo_48khz_ke_16khz_mono(self):
+        """Audio stereo 48kHz harus di-resample ke 16kHz mono."""
+        import numpy as np
+        import wave as wavemod
+
+        # Buat file WAV stereo 48kHz palsu
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "input.wav")
+            data = np.random.randn(48000, 2).astype(np.float32) * 0.1
+            data_int16 = (data * 32767).clip(-32768, 32767).astype(np.int16)
+            with wavemod.open(path, "wb") as wf:
+                wf.setnchannels(2)
+                wf.setsampwidth(2)
+                wf.setframerate(48000)
+                wf.writeframes(data_int16.tobytes())
+
+            # Patch soundfile untuk membaca file
+            sf_palsu = mock.MagicMock()
+            sf_palsu.read.return_value = (data, 48000)
+
+            with mock.patch.dict(sys.modules, {"soundfile": sf_palsu}):
+                hasil = zoom_notulen._resample_ke_16khz(path, 48000, 2)
+                self.assertIsNotNone(hasil)
+                self.assertTrue(os.path.isfile(hasil))
+                # Cek hasil: harus 16kHz mono
+                with wavemod.open(hasil, "rb") as wf:
+                    self.assertEqual(wf.getframerate(), 16000)
+                    self.assertEqual(wf.getnchannels(), 1)
+                # Bersihkan
+                os.remove(hasil)
+
+    def test_resample_gagal_mengembalikan_none(self):
+        """Jika soundfile tidak terinstal, kembalikan None."""
+        with mock.patch.dict(sys.modules, {"soundfile": None}):
+            hasil = zoom_notulen._resample_ke_16khz("nonexistent.wav", 48000, 2)
+            self.assertIsNone(hasil)
+
+
 class TestPeringatanDurasiPanjang(unittest.TestCase):
     """Tes peringatan_durasi_panjang: info untuk rekaman > 1 jam."""
 

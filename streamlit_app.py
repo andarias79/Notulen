@@ -481,41 +481,76 @@ with tab2:
             "Cocok untuk merekam rapat Zoom/Meet. Pastikan volume audio tidak mute."
         )
 
+    # Fungsi perekaman yang dijalankan di thread terpisah
+    def _jalankan_rekaman(path, sumber, durasi):
+        """Menjalankan perekaman audio di thread terpisah."""
+        try:
+            if sumber == "loopback":
+                zoom_notulen.rekam_audio_loopback(durasi, path)
+            else:
+                zoom_notulen.rekam_audio(durasi, path)
+        except Exception as e:
+            # Simpan error ke session state agar UI bisa menampilkannya
+            st.session_state.recording_error = str(e)
+        finally:
+            st.session_state.is_recording = False
+
     # Status rekaman
     if st.session_state.is_recording:
         st.warning("🔴 Sedang merekam... Tekan 'q' di terminal untuk berhenti.")
-        if st.button("⏹️ Hentikan Rekaman", type="secondary"):
-            st.info("Tekan 'q' atau Ctrl+C di terminal untuk menghentikan rekaman.")
+        # Cek apakah thread rekaman sudah selesai
+        thread = st.session_state.get("recording_thread")
+        if thread is not None and not thread.is_alive():
+            # Thread selesai - proses hasilnya
+            st.session_state.recording_thread = None
+            err = st.session_state.pop("recording_error", None)
+            if err:
+                st.error(f"❌ Error saat merekam: {err}")
+                st.session_state.is_recording = False
+            elif st.session_state.audio_file and os.path.exists(st.session_state.audio_file) and os.path.getsize(st.session_state.audio_file) > 0:
+                st.session_state.is_recording = False
+                st.success("✅ Rekaman selesai! Memproses...")
+                transkrip, notulen, error = proses_audio(
+                    st.session_state.audio_file,
+                    bahasa,
+                    engine,
+                    judul=judul if 'judul' in locals() else None,
+                    daftar_peserta=daftar_peserta if 'daftar_peserta' in locals() else None,
+                    notulen_mode=notulen_mode,
+                    subtitle=subtitle,
+                    translate=translate,
+                    pdf=export_pdf,
+                )
+                if error:
+                    st.error(f"❌ Error: {error}")
+                else:
+                    st.session_state.transkrip = transkrip
+                    st.session_state.notulen = notulen
+                    st.success("✅ Proses selesai!")
+            else:
+                st.session_state.is_recording = False
+                st.warning("⚠️ Rekaman kosong atau tidak ada file.")
+        else:
+            # Masih merekam - tampilkan progress
+            if st.button("⏹️ Hentikan Rekaman", type="secondary"):
+                st.info("Tekan 'q' atau Ctrl+C di terminal untuk menghentikan rekaman.")
     else:
         if st.button("🎙️ Mulai Rekam", type="primary", use_container_width=True):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 st.session_state.audio_file = tmp.name
 
             st.session_state.is_recording = True
-            st.rerun()
+            st.session_state.recording_error = None
 
-    # Auto-proses setelah rekaman selesai
-    if st.session_state.is_recording and st.session_state.audio_file:
-        if os.path.exists(st.session_state.audio_file) and os.path.getsize(st.session_state.audio_file) > 0:
-            st.session_state.is_recording = False
-            st.success("✅ Rekaman selesai! Memproses...")
-            transkrip, notulen, error = proses_audio(
-                st.session_state.audio_file,
-                bahasa,
-                engine,
-                judul=judul if 'judul' in locals() else None,
-                daftar_peserta=daftar_peserta if 'daftar_peserta' in locals() else None,
-                notulen_mode=notulen_mode,
-                subtitle=subtitle,
-                translate=translate,
-                pdf=export_pdf,
+            # Jalankan perekaman di thread terpisah agar UI tidak freeze
+            thread = threading.Thread(
+                target=_jalankan_rekaman,
+                args=(st.session_state.audio_file, sumber, durasi),
+                daemon=True,
             )
-            if error:
-                st.error(f"❌ Error: {error}")
-            else:
-                st.session_state.transkrip = transkrip
-                st.session_state.notulen = notulen
-                st.success("✅ Proses selesai!")
+            st.session_state.recording_thread = thread
+            thread.start()
+            st.rerun()
 
 
 # ==========================================
