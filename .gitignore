@@ -21,3 +21,8 @@ Hasil_Notulen/
 
 # Klip uji (artefak tes)
 _klip_henti.wav
+
+# Log & artefak pengujian
+notulen.log
+test.wav
+test_result*.txt
