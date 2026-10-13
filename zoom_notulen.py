@@ -107,8 +107,8 @@ GEMINI_TRANSKRIPSI_MODEL = "gemini-3.6-flash"  # model multimodal terbaru dengan
 # per model, jadi cadangan memakai kuota yang terpisah.
 GEMINI_TRANSKRIPSI_CADANGAN = ["gemini-3.5-flash", "gemini-flash-latest"]
 GEMINI_MAKS_DURASI_AUDIO = 8 * 3600  # batas aman durasi audio per request (~8 jam; dokumen resmi: max 9,5 jam)
-GEMINI_POTONG_DURASI = 2 * 3600      # audio > 2 jam dipotong otomatis (hindari batas token output)
-GEMINI_KOMPRES_FLAC_MIN_MB = 20      # WAV > 20 MB dikompres ke FLAC sementara sebelum upload (lebih cepat)
+GEMINI_POTONG_DURASI = 30 * 60        # audio > 30 menit dipotong otomatis (chunk kecil -> upload lebih stabil)
+GEMINI_KOMPRES_FLAC_MIN_MB = 5       # WAV > 5 MB dikompres ke FLAC sementara sebelum upload (lebih cepat, hemat bandwidth)
 GEMINI_TUNGGU_FILE_DETIK = 600       # waktu tunggu maksimal file diproses di server Gemini (detik)
 # faster-whisper: engine CTranslate2 + kuantisasi INT8 -> hingga ±4x lebih cepat
 # daripada openai-whisper di CPU dengan akurasi setara, plus VAD silero untuk
@@ -171,6 +171,7 @@ def terapkan_konfigurasi(args, konfig):
         "translate": None,
         "no_vad": False,
         "flac": False,
+        "pdf": False,
     }
 
     # 1. Dari file konfigurasi
@@ -1273,16 +1274,24 @@ def _potong_audio(nama_file, mulai_detik, durasi_detik):
     """
     try:
         import soundfile as sf
+        info = sf.info(nama_file)
+        rate = info.samplerate
+        # sf.read() mengharapkan start dan frames dalam jumlah SAMPLE, bukan detik
+        start_frame = int(mulai_detik * rate)
+        num_frames = int(durasi_detik * rate)
         data, rate = sf.read(
-            nama_file, start=int(mulai_detik), frames=int(durasi_detik), dtype="int16"
+            nama_file, start=start_frame, frames=num_frames, dtype="int16"
         )
         if data.size == 0:
             return None
         fd, jalur = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
         sf.write(jalur, data, rate, format="WAV", subtype="PCM_16")
+        durasi_aktual = len(data) / rate if data.ndim == 1 else len(data) / rate
+        logger.info(f"   Potongan audio: {mulai_detik:.0f}s - {mulai_detik + durasi_aktual:.0f}s ({durasi_aktual:.0f}s, {os.path.getsize(jalur) / 1e6:.1f} MB)")
         return jalur
-    except Exception:
+    except Exception as e:
+        logger.info(f"   Gagal memotong audio: {e}")
         return None
 
 
@@ -1358,9 +1367,38 @@ def _parsing_transkrip_gemini(teks, offset=0):
 
 
 def _unggah_dan_tunggu(client, jalur):
-    """Mengunggah file ke File API Gemini lalu menunggu hingga siap (state ACTIVE)."""
-    logger.info(f"-> Mengunggah audio ke Gemini ({os.path.getsize(jalur) / 1e6:.1f} MB)...")
-    berkas = client.files.upload(file=jalur)
+    """Mengunggah file ke File API Gemini lalu menunggu hingga siap (state ACTIVE).
+
+    Upload dicoba hingga 5 kali dengan jeda eksponensial untuk menangani
+    error jaringan sementara (mis. read timeout pada file besar).
+    """
+    ukuran_mb = os.path.getsize(jalur) / 1e6
+    logger.info(f"-> Mengunggah audio ke Gemini ({ukuran_mb:.1f} MB)...")
+
+    maks_coba = 5
+    berkas = None
+    for coba in range(1, maks_coba + 1):
+        try:
+            berkas = client.files.upload(file=jalur)
+            break
+        except Exception as e:
+            pesan = str(e).lower()
+            bisa_retry = (
+                "timeout" in pesan
+                or "timed out" in pesan
+                or "connection" in pesan
+                or "reset" in pesan
+                or "broken pipe" in pesan
+            )
+            if bisa_retry and coba < maks_coba:
+                tunggu = 10 * (2 ** (coba - 1))  # 10, 20, 40, 80 detik
+                logger.info(
+                    f"-> Upload gagal (percobaan {coba}/{maks_coba}): {e}. "
+                    f"Mencoba lagi dalam {tunggu} detik..."
+                )
+                time.sleep(tunggu)
+            else:
+                raise  # biarkan caller (_transkripsi_gemini_satu) menangani
     batas_waktu = time.time() + GEMINI_TUNGGU_FILE_DETIK
     while True:
         status = client.files.get(name=berkas.name)
@@ -1432,8 +1470,8 @@ def transkripsi_audio_gemini(nama_file, bahasa, konteks=None):
     """Transkripsi cloud via Gemini AI: unggah audio -> transkrip verbatim + timestamp + pembicara.
 
     Jauh lebih cepat daripada transkripsi lokal karena diproses di server Google.
-    Membutuhkan internet & kuota Gemini. Audio > 2 jam dipotong otomatis agar
-    hasil tidak terpotong oleh batas token output.
+    Membutuhkan internet & kuota Gemini. Audio > GEMINI_POTONG_DURASI (30 menit)
+    dipotong otomatis agar hasil tidak terpotong oleh batas token output.
 
     konteks: teks berisi istilah domain untuk meningkatkan akurasi (opsional).
     """
@@ -1460,10 +1498,10 @@ def transkripsi_audio_gemini(nama_file, bahasa, konteks=None):
     if durasi > GEMINI_POTONG_DURASI:
         print(
             f"-> Audio {durasi / 3600:.1f} jam: dipotong otomatis per "
-            f"{GEMINI_POTONG_DURASI // 3600} jam agar hasil tidak terpotong."
+            f"{GEMINI_POTONG_DURASI // 60} menit agar hasil tidak terpotong."
         )
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY, http_options={'timeout': 3600})
 
     if durasi > GEMINI_POTONG_DURASI:
         # Audio panjang: transkripsi bertahap per potongan untuk menghindari batas token output
@@ -2588,15 +2626,17 @@ def buat_parser():
              "Default: pasangan loopback dari perangkat output default."
     )
     parser.add_argument(
-        "--no-vad", action="store_true", default=False,
+        "--no-vad", action="store_true", default=None,
         help="Nonaktifkan VAD (Voice Activity Detection) pada transkripsi lokal. "
              "Gunakan jika transkripsi terlalu pendek atau banyak bagian yang hilang. "
-             "VAD bisa terlalu agresif pada audio dengan volume rendah."
+             "VAD bisa terlalu agresif pada audio dengan volume rendah. "
+             "(Tanpa opsi ini, nilainya diambil dari konfigurasi.json jika ada.)"
     )
     parser.add_argument(
-        "--flac", action="store_true", default=False,
+        "--flac", action="store_true", default=None,
         help="Kompresi file audio WAV ke FLAC (lossless) setelah rekaman. "
-             "Mengurangi ukuran file ~50-60% tanpa kehilangan kualitas."
+             "Mengurangi ukuran file ~50-60% tanpa kehilangan kualitas. "
+             "(Tanpa opsi ini, nilainya diambil dari konfigurasi.json jika ada.)"
     )
     parser.add_argument(
         "--format", choices=["md", "txt", "both"], default=None,
@@ -2631,9 +2671,10 @@ def buat_parser():
         help="Huruf besar/kecil berbeda saat search (default: case-insensitive)"
     )
     parser.add_argument(
-        "--pdf", action="store_true", default=False,
+        "--pdf", action="store_true", default=None,
         help="Export transkrip dan/atau notulen ke file PDF (butuh fpdf2). "
-             "File PDF disimpan di folder Hasil_PDF/."
+             "File PDF disimpan di folder Hasil_PDF/. "
+             "(Tanpa opsi ini, nilainya diambil dari konfigurasi.json jika ada.)",
     )
     parser.add_argument(
         "--judul", default=None,

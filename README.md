@@ -339,7 +339,7 @@ python zoom_notulen.py --durasi 3600 --tujuan-email "budi@mail.com, siti@mail.co
 | `--judul <teks>` | otomatis | Judul notulen (dipakai Gemini di heading `# Notulen Rapat - ...`). Jika kosong, Gemini menentukan topik dari transkrip |
 | `--daftar-peserta <teks>` | — | Daftar peserta rapat dipisah koma (mis. `"Budi, Siti, Andi"`). Disertakan sebagai bagian `## Daftar Peserta` di notulen |
 | `--tujuan-email <teks>` | — | Email penerima notulen dipisah koma (mis. `"budi@mail.com, siti@mail.com"`). Kirim notulen via Resend API setelah dibuat |
-| `--model <model>` | `gemini-flash-lite-latest` | Model Gemini untuk membuat notulen. Default adalah model **Flash-Lite tier gratis**; ganti ke `gemini-flash-latest` untuk kualitas lebih tinggi |
+| `--model <model>` | `gemini-3.6-flash` | Model Gemini untuk membuat notulen. Cadangan otomatis: `gemini-flash-lite-latest`, `gemini-flash-latest` (dipakai jika kuota model utama habis) |
 | `--abaikan-senyap` | off | Lewati peringatan rekaman sunyi dan tetap proses transkripsi (untuk audio sangat pelan tapi masih ada isinya) |
 | `--flac` | off | Kompresi WAV ke FLAC (lossless) setelah rekaman. Mengurangi ukuran ~60% |
 
@@ -355,7 +355,7 @@ Hasil_PDF/ Transkrip_2026...pdf          ← file PDF (jika --pdf diaktifkan)
 Hasil_Rekaman/ rekaman_zoom_2026...wav    ← audio (jika merekam via aplikasi ini)
 ```
 
-> Model transkripsi cloud default `gemini-3.6-flash`; jika kuota/lonjakan (429/503) tidak hilang setelah retry otomatis, skrip **beralih ke model cadangan** (`gemini-3.5-flash`, `gemini-flash-latest`) karena kuota tier gratis dihitung per model. Ubah `WHISPER_MODEL` di bagian atas `zoom_notulen.py` untuk menyesuaikan model transkripsi lokal (`base` → `small` / `medium` / `large-v3` untuk akurasi lebih tinggi; `base`/`tiny` untuk kecepatan maksimal). Engine faster-whisper memakai kuantisasi INT8 + VAD silero sehingga ±4× lebih cepat dari OpenAI Whisper di CPU.
+> Model transkripsi cloud default `gemini-3.6-flash`; jika kuota/lonjakan (429/503) tidak hilang setelah retry otomatis, skrip **beralih ke model cadangan** (`gemini-3.5-flash`, `gemini-flash-latest`) karena kuota tier gratis dihitung per model. Ubah `WHISPER_MODEL` di bagian atas `zoom_notulen.py` untuk menyesuaikan model transkripsi lokal — default **`large-v3-turbo`** (akurasi setara `large-v3`, unduh pertama ~3,1 GB); `medium`/`large-v3` untuk akurasi maksimal, `small`/`base`/`tiny` untuk kecepatan & penghematan RAM. Engine faster-whisper memakai kuantisasi INT8 + VAD silero sehingga ±4× lebih cepat dari OpenAI Whisper di CPU.
 
 ---
 
@@ -430,7 +430,7 @@ python zoom_notulen.py --durasi 3600 --sumber loopback --perangkat 8
 
 ```
 [1/3] Perekaman      →  16 kHz mono (mic) / WASAPI (loopback) → .wav
-[2/3] Transkripsi    →  --engine lokal: faster-whisper CTranslate2 INT8 + VAD (model "small")
+[2/3] Transkripsi    →  --engine lokal: faster-whisper CTranslate2 INT8 + VAD (model "large-v3-turbo")
                      →  --engine gemini: upload ke server Google → Gemini 3.6 Flash verbatim + timestamp + pembicara
 [3/3] Notulen        →  Gemini AI → Markdown ber-heading → simpan .md / .txt
 ```
@@ -457,8 +457,8 @@ Sejak memakai faster-whisper (PyAV membundel library FFmpeg), ffmpeg **tidak waj
 **5. Transkripsinya lama / tidak akurat.**
 - **Solusi tercepat: `--engine gemini`** — transkripsi cloud via Gemini (server Google), tanpa beban CPU lokal, plus speaker diarization otomatis. Cukup butuh internet & kuota Gemini.
 - Mode lokal memakai **faster-whisper** (CTranslate2 + INT8 + VAD) yang **±4× lebih cepat** dari OpenAI Whisper di CPU dengan akurasi setara, dan merekam langsung di **16 kHz mono** (file 4× lebih kecil → lebih cepat diproses).
-- Model CTranslate2 diunduh sekali saat pertama dipakai (beberapa ratus MB).
-- Masih kurang cepat? Ganti `WHISPER_MODEL` ke `base`/`tiny` di bagian atas `zoom_notulen.py`, atau gunakan `--engine gemini` (cloud, super cepat).
+- Model CTranslate2 diunduh sekali saat pertama dipakai (default `large-v3-turbo` ~3,1 GB; model lebih kecil seperti `small`/`base` jauh lebih ringan).
+- Masih kurang cepat? Ganti `WHISPER_MODEL` ke `small`/`base`/`tiny` di bagian atas `zoom_notulen.py`, atau gunakan `--engine gemini` (cloud, super cepat).
 - Untuk akurasi lebih tinggi pada istilah rapat: `WHISPER_MODEL = "medium"` atau `"large-v3"`.
 - File audio panjang (berjam-jam) tetap butuh waktu di CPU — untuk kasus ekstrem, potong audio per segmen lalu gabungkan transkripnya.
 
@@ -477,10 +477,10 @@ pendek" — transkripsi tetap dicoba, tapi hasilnya kemungkinan kosong. Catatan:
 tombol `q` aktif di Windows (konsol); Ctrl+C selalu berfungsi di semua platform.
 
 **8. Berapa biaya memakai Gemini API?**
-Model notulen default `gemini-flash-lite-latest` termasuk **tier gratis** Google dengan kuota harian terbesar (cek harga & kuota terkini di [AI Studio pricing](https://ai.google.dev/pricing)). Transkripsi **lokal** (`--engine lokal`) berjalan offline (gratis). Mode **cloud** (`--engine gemini`) memakai model `gemini-3.6-flash` — ada tier gratis harian, dan file audio **diunggah + dihapus otomatis dari server setelah 48 jam** (Files API gratis).
+Model notulen default `gemini-3.6-flash` dengan cadangan otomatis `gemini-flash-lite-latest` (tier **gratis**, kuota harian terbesar — cek harga & kuota terkini di [AI Studio pricing](https://ai.google.dev/pricing)). Transkripsi **lokal** (`--engine lokal`) berjalan offline (gratis). Mode **cloud** (`--engine gemini`) memakai model `gemini-3.6-flash` — ada tier gratis harian, dan file audio **diunggah + dihapus otomatis dari server setelah 48 jam** (Files API gratis).
 
 **12. Apakah `--engine gemini` butuh internet? Bagaimana cara kerjanya?**
-Ya — audio diunggah ke server Google lalu ditranskripsikan verbatim oleh `gemini-3.6-flash` dengan timestamp + speaker diarization. Alurnya: WAV besar dikompres ke FLAC sementara (upload lebih cepat) → unggah ke Files API → tunggu file siap (`ACTIVE`) → Gemini menulis transkrip → file dihapus dari server. Audio lebih dari 2 jam **dipotong otomatis** per bagian agar hasil tidak terpotong; batas aman ±8 jam per request.
+Ya — audio diunggah ke server Google lalu ditranskripsikan verbatim oleh `gemini-3.6-flash` dengan timestamp + speaker diarization. Alurnya: WAV besar dikompres ke FLAC sementara (upload lebih cepat) → unggah ke Files API → tunggu file siap (`ACTIVE`) → Gemini menulis transkrip → file dihapus dari server. Audio lebih dari 30 menit **dipotong otomatis** per bagian 30 menit (upload lebih stabil & hasil tidak terpotong batas token output); batas aman ±8 jam per request.
 Jika model transkripsi kena **429 (kuota harian tier gratis habis)** atau **503 (lonjakan permintaan)** yang tidak hilang setelah percobaan ulang otomatis, skrip **otomatis beralih ke model cadangan** (`gemini-3.5-flash`, `gemini-flash-latest`) karena kuota tier gratis dihitung **per model** — jadi transkripsi tetap jalan meski kuota satu model habis. Daftar cadangan bisa disesuaikan di konstanta `GEMINI_TRANSKRIPSI_CADANGAN` di `zoom_notulen.py`.
 
 **13. Transkripsi cloud vs lokal — mana yang dipakai untuk hasil terbaik?**

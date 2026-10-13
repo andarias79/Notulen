@@ -6,9 +6,11 @@ Menjalankan:
 Tes TIDAK membutuhkan dependensi pihak ketiga (sounddevice, soundfile,
 faster-whisper, google-genai, python-dotenv) karena semua di-mock sebelum import.
 """
-
+import math
 import os
+
 import sys
+
 import tempfile
 import threading
 import types
@@ -571,6 +573,26 @@ class TestKonfigurasi(unittest.TestCase):
         self.assertEqual(cfg["sumber"], "loopback")
         self.assertEqual(cfg["engine"], "gemini")
         self.assertEqual(cfg["tujuan_email"], "a@b.com")
+
+    def test_flag_dari_konfigurasi_dipakai(self):
+        """no_vad/flac/pdf=false dari konfigurasi.json tidak ditimpa default CLI.
+
+        Regresi: parser memakai default False (bukan None) sehingga nilai True
+        dari konfigurasi.json selalu tertimpa.
+        """
+        args = zoom_notulen.buat_parser().parse_args([])
+        cfg = zoom_notulen.terapkan_konfigurasi(
+            args, {"no_vad": True, "flac": True, "pdf": True}
+        )
+        self.assertIs(cfg["no_vad"], True)
+        self.assertIs(cfg["flac"], True)
+        self.assertIs(cfg["pdf"], True)
+
+    def test_flag_cli_menang_atas_konfigurasi(self):
+        args = zoom_notulen.buat_parser().parse_args(["--flac", "--pdf"])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {"flac": False, "pdf": False})
+        self.assertIs(cfg["flac"], True)
+        self.assertIs(cfg["pdf"], True)
 
     def test_cli_engine_menang_atas_konfigurasi(self):
         args = zoom_notulen.buat_parser().parse_args(["--engine", "lokal"])
@@ -1268,7 +1290,7 @@ class TestTranskripsi(unittest.TestCase):
 
     def test_transkripsi_kosong_memicu_systemexit(self):
         model = mock.MagicMock()
-        model.transcribe.return_value = (iter(()), types.SimpleNamespace(language="id"))
+        model.transcribe.return_value = (iter(()), types.SimpleNamespace(language="id", duration=10.0))
         with mock.patch.object(zoom_notulen, "WhisperModel", return_value=model):
             with self.assertRaises(SystemExit):
                 zoom_notulen.transkripsi_audio("a.wav", "id")
@@ -1384,22 +1406,31 @@ class TestTranskripsiGemini(unittest.TestCase):
         client.files.upload.assert_not_called()
 
     def test_audio_panjang_dipotong_otomatis(self):
-        """Audio > 2 jam dipotong; timestamp tiap potongan digeser oleh offset."""
+        """Audio di atas GEMINI_POTONG_DURASI (30 menit) dipotong otomatis;
+        timestamp tiap potongan digeser oleh offset."""
         client = self._klien_palsu()
+        durasi_audio = 3 * 3600 + 10
+        jumlah_harapan = math.ceil(durasi_audio / zoom_notulen.GEMINI_POTONG_DURASI)
         with mock.patch.object(zoom_notulen.genai, "Client", return_value=client), mock.patch.object(
-            zoom_notulen, "_durasi_audio", return_value=3 * 3600 + 10
+            zoom_notulen, "_durasi_audio", return_value=durasi_audio
         ), mock.patch.object(
             zoom_notulen, "_potong_audio", return_value="/tmp/potongan.wav"
         ) as potong, mock.patch.object(
             zoom_notulen, "_transkripsi_gemini_satu", side_effect=lambda c, f, b, offset=0, konteks=None: (
-                f"[{offset // 3600:02d}:00:00] Bagian"
+                f"[{offset // 3600:02d}:{offset % 3600 // 60:02d}:00] Bagian"
             )
         ) as satu, mock.patch.object(zoom_notulen, "_hapus_file") as hapus:
             hasil = zoom_notulen.transkripsi_audio_gemini("audio.wav", "id")
-        self.assertEqual(potong.call_count, 2)  # 3 jam 10 dtk -> 2 potongan
-        self.assertEqual(satu.call_count, 2)
+        self.assertEqual(potong.call_count, jumlah_harapan)  # 3 j 10 dtk / 30 mnt -> 7 potongan
+        self.assertEqual(satu.call_count, jumlah_harapan)
+        # Offset tiap potongan harus kelipatan GEMINI_POTONG_DURASI berurutan
+        offsets = [c.kwargs["offset"] for c in satu.call_args_list]
+        self.assertEqual(
+            offsets,
+            [i * zoom_notulen.GEMINI_POTONG_DURASI for i in range(jumlah_harapan)],
+        )
         self.assertIn("[00:00:00] Bagian", hasil)
-        self.assertIn("[02:00:00] Bagian", hasil)
+        self.assertIn("[03:00:00] Bagian", hasil)
         hapus.assert_called()
 
     def test_wav_besar_dikompres_ke_flac(self):

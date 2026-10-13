@@ -174,7 +174,7 @@ goto :selesai
 
 :no_python
 echo [ERROR] Python tidak ditemukan di PATH.
-echo Instal Python 3.9-3.11 dari https://python.org lalu coba lagi.
+echo Instal Python 3.9-3.13 dari https://python.org lalu coba lagi.
 pause
 exit /b 1
 

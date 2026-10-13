@@ -234,7 +234,7 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
             try:
                 audio_path = zoom_notulen.kurangi_noise(audio_path)
                 status.update(label="✅ Noise reduction selesai!", state="complete")
-            except Exception as e:
+            except (Exception, SystemExit) as e:
                 status.update(label="⚠️ Gagal mengurangi noise", state="warning")
 
     # 1. Transkripsi
@@ -257,7 +257,7 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
             )
             progress_bar.progress(1.0, text="Selesai!")
             status.update(label="✅ Transkripsi selesai!", state="complete")
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             progress_bar.empty()
             status.update(label="❌ Transkripsi gagal", state="error")
             return None, None, str(e)
@@ -279,7 +279,7 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
                 cfg, transkrip_teks, daftar_peserta
             )
             status.update(label="✅ Notulen selesai!", state="complete")
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             status.update(label="❌ Notulen gagal", state="error")
             return transkrip_teks, None, str(e)
 
@@ -303,7 +303,7 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
                 nama_subtitle = os.path.join(DIR_SUBTITLE, f"subtitle_{timestamp}")
                 zoom_notulen.simpan_subtitle(transkrip_teks, nama_subtitle, subtitle)
                 status.update(label="✅ Subtitle selesai!", state="complete")
-            except Exception as e:
+            except (Exception, SystemExit) as e:
                 status.update(label="⚠️ Subtitle gagal", state="warning")
 
     # 4. Translate (opsional)
@@ -319,7 +319,7 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
                 with open(nama_translate, "w", encoding="utf-8") as f:
                     f.write(teks_translate)
                 status.update(label="✅ Terjemahan selesai!", state="complete")
-            except Exception as e:
+            except (Exception, SystemExit) as e:
                 status.update(label="⚠️ Translate gagal", state="warning")
 
     # 5. PDF (opsional)
@@ -331,7 +331,7 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
                 nama_pdf = os.path.join(DIR_PDF, f"Notulen_{timestamp}.pdf")
                 zoom_notulen.export_pdf(notulen, nama_pdf, judul or "Notulen Rapat")
                 status.update(label="✅ PDF selesai!", state="complete")
-            except Exception as e:
+            except (Exception, SystemExit) as e:
                 status.update(label="⚠️ PDF gagal", state="warning")
 
     # 6. Email (opsional)
@@ -340,15 +340,16 @@ def proses_audio(audio_path, bahasa, engine, judul=None, daftar_peserta=None,
             try:
                 daftar_email = [e.strip() for e in email.split(",") if '@' in e]
                 if daftar_email:
+                    subjek = f"Notulen Rapat - {judul}" if judul else f"Notulen Rapat {timestamp}"
                     zoom_notulen.kirim_email_resend(
-                        daftar_email, 
-                        nama_notulen, 
-                        nama_transkrip if 'nama_transkrip' in locals() and os.path.exists(nama_transkrip) else None
+                        daftar_email,
+                        subjek,
+                        notulen,
                     )
                     status.update(label="✅ Email terkirim!", state="complete")
                 else:
                     status.update(label="⚠️ Format email tidak valid", state="warning")
-            except Exception as e:
+            except (Exception, SystemExit) as e:
                 status.update(label="⚠️ Gagal mengirim email", state="warning")
                 st.error(str(e))
 
@@ -548,7 +549,7 @@ with tab_yt:
                     
                     # Set ke session state
                     st.session_state.audio_file = tmp_path
-                except Exception as e:
+                except (Exception, SystemExit) as e:
                     status_yt.update(label="❌ Gagal mengunduh", state="error")
                     st.error(f"Error: {e}")
                     tmp_path = None
@@ -620,7 +621,7 @@ with tab2:
                 zoom_notulen.rekam_audio_loopback(durasi, path)
             else:
                 zoom_notulen.rekam_audio(durasi, path)
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             # Simpan error ke session state agar UI bisa menampilkannya
             st.session_state.recording_error = str(e)
         finally:
@@ -858,10 +859,32 @@ with tab3:
                 
                 with col_regenerate:
                     if st.button("🤖 Regenerate", use_container_width=True, help="Buat notulen baru dari transkrip"):
-                        st.info("⏳ Membuat notulen baru...")
-                        if not hasattr(st.session_state, 'notulen_original'):
-                            st.session_state.notulen_original = st.session_state.notulen
-                        st.rerun()
+                        if not st.session_state.transkrip:
+                            st.warning("⚠️ Tidak ada transkrip untuk di-regenerate.")
+                        else:
+                            st.info("⏳ Membuat notulen baru...")
+                            try:
+                                cfg_req = {
+                                    "judul": judul if 'judul' in locals() else None,
+                                    "model": zoom_notulen.GEMINI_MODEL,
+                                    "notulen_mode": notulen_mode,
+                                }
+                                peserta_req = (
+                                    daftar_peserta if 'daftar_peserta' in locals() else None
+                                ) or None
+                                notulen_baru = zoom_notulen._buat_notulen_sesuai_mode(
+                                    cfg_req, st.session_state.transkrip, peserta_req
+                                )
+                                if hasattr(st.session_state, 'notulen_original'):
+                                    pass  # notulen_original dipertahankan untuk fitur compare
+                                else:
+                                    st.session_state.notulen_original = st.session_state.notulen
+                                st.session_state.notulen = notulen_baru
+                                simpan_ke_history(notulen_baru)
+                                st.success("✅ Notulen baru dibuat dari transkrip.")
+                                st.rerun()
+                            except (Exception, SystemExit) as e:
+                                st.error(f"❌ Gagal regenerate: {e}")
                 
                 # Tampilkan info history
                 if st.session_state.edit_history:
