@@ -20,6 +20,15 @@ from pathlib import Path
 
 import streamlit as st
 
+# Muat secrets (Streamlit Cloud atau .streamlit/secrets.toml) ke environment
+# SEBELUM import zoom_notulen, karena zoom_notulen membaca os.environ.
+try:
+    for _kunci in ("GEMINI_API_KEY", "RESEND_API_KEY", "RESEND_PENGIRIM"):
+        if _kunci not in os.environ and _kunci in st.secrets:
+            os.environ[_kunci] = str(st.secrets[_kunci])
+except Exception:
+    pass  # tanpa secrets (mis. lokal via .env) — lanjutkan
+
 # Import modul utama
 try:
     import zoom_notulen

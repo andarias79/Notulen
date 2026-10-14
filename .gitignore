@@ -1,5 +1,6 @@
 # Rahasia - JANGAN pernah di-commit
 .env
+.streamlit/secrets.toml
 
 # File audio hasil rekaman
 rekaman_zoom_*.wav

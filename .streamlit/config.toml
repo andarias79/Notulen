@@ -1,0 +1,14 @@
+# Konfigurasi Streamlit untuk aplikasi Notulen Rapat Zoom.
+# File ini boleh di-commit (berisi pengaturan non-rahasia).
+
+[theme]
+base = "light"
+primaryColor = "#1f77b4"
+
+[server]
+# Baik untuk menjalankan lokal: tidak membuka browser otomatis, port tetap.
+port = 8501
+headless = true
+
+[browser]
+gatherUsageStats = false
