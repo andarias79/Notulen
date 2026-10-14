@@ -29,11 +29,21 @@ try:
 except Exception:
     pass  # tanpa secrets (mis. lokal via .env) — lanjutkan
 
-# Import modul utama
+# Import modul utama. SystemExit juga ditangkap: zoom_notulen menolak
+# import bila GEMINI_API_KEY tidak ada — tanpa ini, app mati dengan
+# traceback alih-alih pesan ramah saat Secrets/.env belum diisi.
 try:
     import zoom_notulen
-except ImportError as e:
-    st.error(f"Gagal mengimport zoom_notulen: {e}")
+except (ImportError, SystemExit) as e:
+    pesan = str(getattr(e, "code", e) or e)
+    st.error(
+        "Gagal mengimport zoom_notulen:\n\n"
+        f"{pesan}\n\n"
+        "**Cara memperbaiki:**\n"
+        "- **Streamlit Cloud**: buka App menu → Settings → Secrets, lalu isi GEMINI_API_KEY sebagai string TOML\n"
+        "- **Lokal**: salin `.env.example` menjadi `.env` dan isi `GEMINI_API_KEY` (atau salin "
+        "`.streamlit/secrets.toml.example` menjadi `.streamlit/secrets.toml`)"
+    )
     st.stop()
 
 # ==========================================
