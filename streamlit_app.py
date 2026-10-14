@@ -629,7 +629,7 @@ with tab2:
 
     # Status rekaman
     if st.session_state.is_recording:
-        st.warning("🔴 Sedang merekam... Tekan 'q' di terminal untuk berhenti.")
+        st.warning("🔴 Sedang merekam... tekan tombol '⏹️ Hentikan Rekaman' di bawah (atau 'q' di terminal) untuk berhenti.")
         # Cek apakah thread rekaman sudah selesai
         thread = st.session_state.get("recording_thread")
         if thread is not None and not thread.is_alive():
@@ -670,7 +670,10 @@ with tab2:
         else:
             # Masih merekam - tampilkan progress
             if st.button("⏹️ Hentikan Rekaman", type="secondary"):
-                st.info("Tekan 'q' atau Ctrl+C di terminal untuk menghentikan rekaman.")
+                if zoom_notulen.hentikan_rekaman():
+                    st.info("⏹️ Rekaman dihentikan — audio yang sudah terekam akan disimpan & diproses...")
+                else:
+                    st.info("Tidak ada perekaman aktif yang bisa dihentikan.")
     else:
         if st.button("🎙️ Mulai Rekam", type="primary", use_container_width=True):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:

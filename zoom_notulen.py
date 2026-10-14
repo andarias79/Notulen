@@ -41,8 +41,6 @@ import threading
 import time
 
 import logging
-import os
-import sys
 
 logger = logging.getLogger("notulen")
 logger.setLevel(logging.DEBUG)
@@ -179,7 +177,16 @@ def terapkan_konfigurasi(args, konfig):
         if k in konfig and konfig[k] not in (None, ""):
             hasil[k] = konfig[k]
 
-    # Validasi nilai yang berasal dari konfigurasi
+    # 2. Argumen CLI menang jika diisi eksplisit
+    for k in hasil:
+        nilai = getattr(args, k, None)
+        if nilai is not None:
+            hasil[k] = nilai
+
+    # 3. Validasi nilai AKHIR (CLI > konfigurasi). Validasi dikerjakan SETELAH
+    #    override CLI sehingga nilai konfigurasi yang ditimpa CLI tidak lagi
+    #    memicu error — mode yang tidak memakai durasi (mis. --list-devices,
+    #    --search) tetap bisa berjalan meski 'durasi' di konfigurasi.json rusak.
     if not isinstance(hasil["durasi"], int) or hasil["durasi"] <= 0:
         raise SystemExit("\nERROR: 'durasi' di konfigurasi.json harus angka positif.")
     if hasil["sumber"] not in PILIHAN_SUMBER:
@@ -198,12 +205,6 @@ def terapkan_konfigurasi(args, konfig):
         raise SystemExit(
             f"\nERROR: 'notulen_mode' di konfigurasi.json harus salah satu dari {PILIHAN_NOTULEN_MODE}."
         )
-
-    # 2. Argumen CLI menang jika diisi eksplisit
-    for k in hasil:
-        nilai = getattr(args, k, None)
-        if nilai is not None:
-            hasil[k] = nilai
     return hasil
 
 
@@ -271,6 +272,26 @@ def _pantau_tombol_henti(berhenti, pause_event=None):
         time.sleep(0.05)
 
 
+# Registry event perekaman aktif: memungkinkan penghentian rekaman dari luar
+# (mis. tombol 'Hentikan Rekaman' di Web UI Streamlit), setara tombol 'q'.
+_rekaman_aktif = {"berhenti": None}
+
+
+def hentikan_rekaman():
+    """Menghentikan perekaman yang sedang berjalan (dipakai Web UI/Streamlit).
+
+    Ekivalen dengan menekan 'q' di konsol: rekaman berhenti, audio yang sudah
+    terekam tetap disimpan lalu diproses ke transkripsi & notulen.
+    Mengembalikan True jika ada perekaman aktif yang diberi tanda berhenti,
+    False jika tidak ada perekaman yang berjalan.
+    """
+    berhenti = _rekaman_aktif.get("berhenti")
+    if berhenti is not None:
+        berhenti.set()
+        return True
+    return False
+
+
 def _rekam_berhenti_dengan_pause():
     """Memulai utas pemantau tombol henti DAN pause/resume.
 
@@ -278,6 +299,7 @@ def _rekam_berhenti_dengan_pause():
     """
     berhenti = threading.Event()
     pause = threading.Event()
+    _rekaman_aktif["berhenti"] = berhenti  # daftarkan agar bisa dihenti dari UI
     utas = threading.Thread(target=_pantau_tombol_henti, args=(berhenti, pause), daemon=True)
     utas.start()
     return berhenti, pause
@@ -325,7 +347,6 @@ def rekam_audio(durasi_detik, nama_file):
         frame_bytes = sampwidth * channels
         progress_interval = int(PROGRESS_INTERVAL * SAMPLE_RATE)  # cetak progress tiap N detik
         terakhir_progress = 0
-        waktu_pause_total = 0  # total waktu dalam mode pause
         waktu_pause_mulai = 0  # kapan pause dimulai
 
         berhenti, pause_event = _rekam_berhenti_dengan_pause()
@@ -352,8 +373,7 @@ def rekam_audio(durasi_detik, nama_file):
                             time.sleep(0.1)  # hemat CPU saat pause
                             continue
                         elif waktu_pause_mulai > 0:
-                            # Resume dari pause
-                            waktu_pause_total += time.time() - waktu_pause_mulai
+                            # Resume dari pause (durasi pause tidak dihitung)
                             waktu_pause_mulai = 0
 
                         try:
@@ -384,6 +404,7 @@ def rekam_audio(durasi_detik, nama_file):
             # selama transkripsi/prompt berikutnya (utas daemon bocor per sesi).
             if berhenti is not None:
                 berhenti.set()
+            _rekaman_aktif["berhenti"] = None  # perekaman selesai, lepas registry
     except Exception as e:
         raise SystemExit(f"\nERROR saat merekam audio: {e}") from e
     durasi_aktual = total_read / SAMPLE_RATE
@@ -493,7 +514,6 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
         total_read = 0
         progress_interval = int(PROGRESS_INTERVAL * sample_rate_rekam)
         terakhir_progress = 0
-        waktu_pause_total = 0
         waktu_pause_mulai = 0
         berhenti, pause_event = _rekam_berhenti_dengan_pause()
         try:
@@ -513,8 +533,7 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
                             time.sleep(0.1)  # hemat CPU saat pause
                             continue
                         elif waktu_pause_mulai > 0:
-                            # Resume dari pause
-                            waktu_pause_total += time.time() - waktu_pause_mulai
+                            # Resume dari pause (durasi pause tidak dihitung)
                             waktu_pause_mulai = 0
 
                         try:
@@ -546,6 +565,7 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
             # selama transkripsi/prompt berikutnya (utas daemon bocor per sesi).
             if berhenti is not None:
                 berhenti.set()
+            _rekaman_aktif["berhenti"] = None  # perekaman selesai, lepas registry
             stream.stop_stream()
             stream.close()
     durasi_aktual = total_read / sample_rate_rekam
@@ -1119,6 +1139,22 @@ def ukur_rms(nama_file):
             return None
 
         data = np.frombuffer(frame_bytes, dtype=dtype).astype(np.float64) / pembagi
+        if data.size == 0:
+            return 0.0
+        return float(np.sqrt((data**2).mean()))
+    except Exception:
+        pass  # bukan WAV / header tidak valid -> coba soundfile sebagai cadangan
+
+    # Fallback: soundfile mendukung FLAC/OGG/MP3 (mis. file hasil --flac) agar
+    # deteksi "rekaman hampir sunyi" tidak diam-diam dilewati.
+    try:
+        import soundfile as sf
+
+        with sf.SoundFile(nama_file) as f:
+            frames_baca = min(len(f), int(AMBANG_RMS_SAMPEL_DETIK * f.samplerate))
+            data = f.read(frames_baca, dtype="float64")
+        if len(data.shape) > 1 and data.shape[1] > 1:
+            data = data.mean(axis=1)
         if data.size == 0:
             return 0.0
         return float(np.sqrt((data**2).mean()))
@@ -2635,7 +2671,7 @@ def buat_parser():
     parser.add_argument(
         "--flac", action="store_true", default=None,
         help="Kompresi file audio WAV ke FLAC (lossless) setelah rekaman. "
-             "Mengurangi ukuran file ~50-60% tanpa kehilangan kualitas. "
+             "Mengurangi ukuran file ~50-60%% tanpa kehilangan kualitas. "
              "(Tanpa opsi ini, nilainya diambil dari konfigurasi.json jika ada.)"
     )
     parser.add_argument(
@@ -2840,7 +2876,7 @@ def main():
                 p.strip() for p in cfg["daftar_peserta"].split(",") if p.strip()
             )
 
-        notulen = _buat_notulan_sesuai_mode(
+        notulen = _buat_notulen_sesuai_mode(
             cfg, transkrip_teks, daftar_peserta
         )
 
@@ -2876,7 +2912,7 @@ def main():
         simpan_notulen(notulen, os.path.join(DIR_NOTULEN, f"Notulen_Rapat_{timestamp}"), cfg["format"])
 
         # Export ke PDF jika diminta
-        if args.pdf:
+        if cfg["pdf"]:
             DIR_PDF = "Hasil_PDF"
             os.makedirs(DIR_PDF, exist_ok=True)
             nama_pdf_transkrip = os.path.join(DIR_PDF, f"Transkrip_{timestamp}.pdf")
@@ -3021,7 +3057,7 @@ def main():
     simpan_notulen(notulen, os.path.join(DIR_NOTULEN, f"Notulen_Rapat_{timestamp}"), cfg["format"])
 
     # Export ke PDF jika diminta
-    if args.pdf:
+    if cfg["pdf"]:
         DIR_PDF = "Hasil_PDF"
         os.makedirs(DIR_PDF, exist_ok=True)
         # Export transkrip ke PDF

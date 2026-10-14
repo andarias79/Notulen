@@ -1946,6 +1946,93 @@ class TestPDFExport(unittest.TestCase):
             self.assertTrue(hasil.endswith(".pdf"))
             self.assertTrue(os.path.isfile(hasil))
 
+def _impor_soundfile_asli():
+    """Impor soundfile ASLI (bypass mock di sys.modules); None jika tidak terinstal."""
+    import importlib
+    simpan = sys.modules.get("soundfile")
+    sys.modules.pop("soundfile", None)
+    try:
+        return importlib.import_module("soundfile")
+    except ImportError:
+        return None
+    finally:
+        if simpan is not None:
+            sys.modules["soundfile"] = simpan
+        else:
+            sys.modules.pop("soundfile", None)
+
+
+def _soundfile_asli_tersedia():
+    return _impor_soundfile_asli() is not None
+
+
+class TestPerbaikanBugRegresi(unittest.TestCase):
+    """Regresi untuk jalur yang dahulu bocor (tidak tertutup tes lama)."""
+
+    def test_format_help_tidak_crash_tanda_persen(self):
+        """format_help() tidak boleh gagal karena '%' telanjang di help --flac."""
+        try:
+            hasil = zoom_notulen.buat_parser().format_help()
+        except ValueError as e:
+            self.fail(f"format_help() crash: {e}")
+        self.assertIn("--flac", hasil)
+
+    def test_durasi_rusak_dari_config_ditimpa_cli(self):
+        """'durasi' tidak valid di konfigurasi.json boleh ditimpa CLI yang valid."""
+        parser = zoom_notulen.buat_parser()
+        args = parser.parse_args(["--durasi", "120"])
+        cfg = zoom_notulen.terapkan_konfigurasi(args, {"durasi": "3600"})
+        self.assertEqual(cfg["durasi"], 120)
+
+    def test_durasi_rusak_dari_config_tanpa_cli_tetap_ditolak(self):
+        """Tanpa override CLI, 'durasi' tidak valid tetap ditolak."""
+        parser = zoom_notulen.buat_parser()
+        args = parser.parse_args([])
+        with self.assertRaises(SystemExit):
+            zoom_notulen.terapkan_konfigurasi(args, {"durasi": "3600"})
+
+    def test_mode_transkrip_memanggil_pembuat_notulen(self):
+        """main() dengan --transkrip harus memanggil _buat_notulen_sesuai_mode
+        (regresi untuk typo '_buat_notulan' yang menyebabkan NameError)."""
+        with tempfile.TemporaryDirectory() as d:
+            jalur_t = os.path.join(d, "Transkrip_uji.txt")
+            with open(jalur_t, "w", encoding="utf-8") as f:
+                f.write("[00:05] Pembicara 1: selamat pagi")
+            argv = ["zoom_notulen.py", "--transkrip", jalur_t]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(zoom_notulen, "_buat_notulen_sesuai_mode",
+                                   return_value="# Notulen Uji") as mk, \
+                 mock.patch.object(zoom_notulen, "simpan_notulen") as sn, \
+                 mock.patch.object(zoom_notulen, "periksa_halusinasi_notulen",
+                                   return_value=[]):
+                zoom_notulen.main()
+        mk.assert_called_once()
+        sn.assert_called_once()
+
+    def test_hentikan_rekaman_menyetel_event(self):
+        """hentikan_rekaman() menyetel event perekaman aktif (dipakai Web UI)."""
+        ev = threading.Event()
+        zoom_notulen._rekaman_aktif["berhenti"] = ev
+        try:
+            self.assertTrue(zoom_notulen.hentikan_rekaman())
+            self.assertTrue(ev.is_set())
+        finally:
+            zoom_notulen._rekaman_aktif["berhenti"] = None
+        self.assertFalse(zoom_notulen.hentikan_rekaman())
+
+    @unittest.skipUnless(_soundfile_asli_tersedia(), "soundfile asli tidak terinstal")
+    def test_ukur_rms_mendukung_flac(self):
+        """ukur_rms mendukung FLAC (hasil --flac) — tidak mengembalikan None."""
+        sf_asli = _impor_soundfile_asli()
+        with tempfile.TemporaryDirectory() as d:
+            jalur = os.path.join(d, "uji.flac")
+            data = np.sin(np.linspace(0.0, 100.0, 16000)) * 5000.0
+            sf_asli.write(jalur, data, 16000, format="FLAC", subtype="PCM_16")
+            with mock.patch.dict(sys.modules, {"soundfile": sf_asli}):
+                rms = zoom_notulen.ukur_rms(jalur)
+            self.assertIsNotNone(rms)
+            self.assertGreater(rms, 1e-4)
+
 
 if __name__ == "__main__":
     unittest.main()

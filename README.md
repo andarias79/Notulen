@@ -514,7 +514,7 @@ pihak ketiga** (semua di-mock):
 python -m unittest test_zoom_notulen -v
 ```
 
-Contoh keluaran: `Ran 105 tests ... OK`.
+Contoh keluaran: `Ran 192 tests ... OK`.
 
 Tes audit juga punya file tersendiri:
 
