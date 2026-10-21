@@ -644,6 +644,12 @@ with tab2:
             # Simpan error ke session state agar UI bisa menampilkannya
             st.session_state.recording_error = str(e)
         finally:
+            # Pastikan thread transkripsi live juga berhenti (jaga-jaga jika
+            # perekaman selesai karena durasi habis / error, bukan tombol).
+            try:
+                zoom_notulen.berhenti_transkripsi_live()
+            except Exception:
+                pass
             st.session_state.is_recording = False
 
     # Status rekaman
@@ -688,11 +694,129 @@ with tab2:
                 st.warning("⚠️ Rekaman kosong atau tidak ada file.")
         else:
             # Masih merekam - tampilkan progress
+            st.caption(
+                "💡 Rapat belum selesai? Perpanjang durasi rekaman tanpa memutus audio "
+                "— pakai panel **Perpanjang Durasi** di bawah."
+            )
             if st.button("⏹️ Hentikan Rekaman", type="secondary"):
+                zoom_notulen.berhenti_transkripsi_live()
                 if zoom_notulen.hentikan_rekaman():
                     st.info("⏹️ Rekaman dihentikan — audio yang sudah terekam akan disimpan & diproses...")
                 else:
                     st.info("Tidak ada perekaman aktif yang bisa dihentikan.")
+            status_rekam = zoom_notulen._durasi_rekaman_aktif()
+            if status_rekam:
+                terekam, target = status_rekam
+                # Peringatan: sisa waktu rekaman mendekati target
+                sisa_detik = max(float(target) - float(terekam), 0.0)
+                st.caption(
+                    f"Terekam: **{zoom_notulen._format_durasi(terekam)}** | "
+                    f"Target total: **{zoom_notulen._format_durasi(target)}** "
+                    f"({int(target)} detik)"
+                )
+                if sisa_detik <= float(zoom_notulen.PERINGATAN_SISA_DETIK):
+                    st.warning(
+                        f"⏰ Sisa rekaman ±{int(sisa_detik / 60)} menit — rapat masih berjalan? "
+                        "Perpanjang sekarang agar perekaman tidak berhenti tiba-tiba."
+                    )
+                    if st.button(
+                        "➕ Tambah 15 menit sekarang",
+                        key="btn_perpanjang_cepat",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        if zoom_notulen.tambah_durasi_rekaman(900):
+                            st.info("✅ Durasi perekaman ditambah 15 menit.")
+                        else:
+                            st.warning("Tidak ada perekaman aktif.")
+            else:
+                st.caption("Status perekaman aktif tidak tersedia.")
+
+            # Tombol preset cepat (+5/+10/+15/+30 menit)
+            preset_cols = st.columns(4)
+            for pcol, menit_preset in zip(preset_cols, (5, 10, 15, 30)):
+                with pcol:
+                    if st.button(
+                        f"+{menit_preset} mnt",
+                        key=f"tambah_preset_{menit_preset}",
+                        use_container_width=True,
+                    ):
+                        if zoom_notulen.tambah_durasi_rekaman(menit_preset * 60):
+                            st.info(f"✅ Durasi perekaman ditambah {menit_preset} menit.")
+                        else:
+                            st.warning("Tidak ada perekaman aktif.")
+
+            # Input bebas: tambah berapa menit pun (1-240)
+            menit_tambahan = st.number_input(
+                "Atau tambah berapa menit (bebas)",
+                min_value=1,
+                max_value=240,
+                value=15,
+                step=1,
+                key="menit_tambahan_rekam",
+                help="Durasi perekaman diperpanjang tanpa menghentikan rekaman",
+            )
+            if st.button(
+                "➕ Tambahkan Durasi",
+                type="primary",
+                use_container_width=True,
+                key="btn_tambahdurasi_manual",
+            ):
+                if zoom_notulen.tambah_durasi_rekaman(int(menit_tambahan) * 60):
+                    st.info(f"✅ Durasi perekaman ditambah {int(menit_tambahan)} menit.")
+                else:
+                    st.warning("Tidak ada perekaman aktif.")
+
+            # Panel transkrip live: fragment menyegarkan diri sendiri tiap
+            # 5 detik tanpa mererun seluruh halaman (rekaman tidak terganggu).
+            # Bisa disembunyikan agar hemat layar saat rapat berjalan.
+            sembunyikan_live = st.toggle(
+                "Sembunyikan panel transkrip live",
+                key="sembunyikan_transkrip_live",
+                help="Matikan lagi untuk menampilkan kembali teks live",
+            )
+            if not sembunyikan_live:
+                with st.expander("🔴 Transkrip Live", expanded=True):
+                    @st.fragment(run_every=5)
+                    def _panel_transkrip_live():
+                        status_live = zoom_notulen.status_transkrip_live()
+                        st.caption(
+                            f"Engine live: {engine} | Bahasa: {bahasa} | "
+                            "diperbarui otomatis tiap ±5 detik"
+                        )
+                        if status_live["error"]:
+                            st.warning(f"⚠️ Transkripsi live bermasalah: {status_live['error']}")
+                        if status_live["teks"]:
+                            st.text_area(
+                                "Transkrip Live",
+                                value=status_live["teks"],
+                                height=300,
+                                disabled=True,
+                                key="transkrip_live_display",
+                                label_visibility="collapsed",
+                            )
+                            # File teks sementara ikut diperbarui thread live;
+                            # tombol unduh memberi salinan terbaru saat rapat berjalan.
+                            jalur_txt = status_live.get("file_txt")
+                            if jalur_txt and os.path.exists(jalur_txt):
+                                with open(jalur_txt, "r", encoding="utf-8") as f:
+                                    isi_txt = f.read()
+                                if isi_txt:
+                                    st.download_button(
+                                        "⬇️ Unduh transkrip live (txt)",
+                                        data=isi_txt,
+                                        file_name=zoom_notulen.LIVE_FILE_TXT,
+                                        mime="text/plain",
+                                        key="btn_unduh_transkrip_live",
+                                    )
+                        else:
+                            st.caption(
+                                "⏳ Belum ada ucapan yang ditranskripsi — teks akan "
+                                "muncul di sini begitu ada yang bicara (interval ±1 menit)."
+                            )
+                    _panel_transkrip_live()
+            else:
+                st.caption("🔇 Panel transkrip live disembunyikan — perekaman tetap berjalan.")
     else:
         if st.button("🎙️ Mulai Rekam", type="primary", use_container_width=True):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
@@ -700,6 +824,19 @@ with tab2:
 
             st.session_state.is_recording = True
             st.session_state.recording_error = None
+
+            # Mulai transkripsi live di thread daemon (teks muncul saat ada
+            # yang bicara). Cukup sekali per perekaman; gagal = tidak fatal,
+            # rekaman tetap jalan dan hasil akhir tetap ditranskripsi penuh.
+            try:
+                zoom_notulen.mulai_transkripsi_live(
+                    st.session_state.audio_file,
+                    engine=engine,
+                    bahasa=bahasa,
+                    konteks=konteks if konteks else None,
+                )
+            except Exception:
+                pass
 
             # Jalankan perekaman di thread terpisah agar UI tidak freeze
             thread = threading.Thread(

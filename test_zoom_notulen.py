@@ -2020,6 +2020,45 @@ class TestPerbaikanBugRegresi(unittest.TestCase):
             zoom_notulen._rekaman_aktif["berhenti"] = None
         self.assertFalse(zoom_notulen.hentikan_rekaman())
 
+    def test_tambah_durasi_rekaman_memperpanjang_target(self):
+        """tambah_durasi_rekaman() menambah durasi target perekaman aktif."""
+        zoom_notulen._rekaman_aktif["durasi_target"] = 3600
+        try:
+            self.assertTrue(zoom_notulen.tambah_durasi_rekaman(900))
+            self.assertEqual(zoom_notulen._rekaman_aktif["durasi_target"], 4500)
+        finally:
+            zoom_notulen._rekaman_aktif["durasi_target"] = None
+        self.assertFalse(zoom_notulen.tambah_durasi_rekaman(900))
+
+    def test_tambah_durasi_rekaman_tanpa_rekaman_aktif(self):
+        """tambah_durasi_rekaman() False jika tidak ada perekaman berjalan."""
+        self.assertFalse(zoom_notulen.tambah_durasi_rekaman(900))
+        self.assertFalse(zoom_notulen.tambah_durasi_rekaman(0))
+        self.assertFalse(zoom_notulen.tambah_durasi_rekaman(-5))
+
+    def test_atur_sisa_durasi_rekaman_menghitung_dari_terekam(self):
+        """atur_sisa_durasi_rekaman() menyetel target = terekam + sisa."""
+        zoom_notulen._rekaman_aktif["durasi_target"] = 3600
+        zoom_notulen._rekaman_aktif["detik_terekam"] = 600.0
+        try:
+            self.assertTrue(zoom_notulen.atur_sisa_durasi_rekaman(300))
+            self.assertEqual(zoom_notulen._rekaman_aktif["durasi_target"], 900)
+        finally:
+            zoom_notulen._rekaman_aktif["durasi_target"] = None
+            zoom_notulen._rekaman_aktif["detik_terekam"] = None
+        self.assertFalse(zoom_notulen.atur_sisa_durasi_rekaman(300))
+
+    def test_durasi_rekaman_aktif_status(self):
+        """_durasi_rekaman_aktif() mengembalikan (terekam, target) atau None."""
+        self.assertIsNone(zoom_notulen._durasi_rekaman_aktif())
+        zoom_notulen._rekaman_aktif["durasi_target"] = 3600
+        zoom_notulen._rekaman_aktif["detik_terekam"] = 10.0
+        try:
+            self.assertEqual(zoom_notulen._durasi_rekaman_aktif(), (10.0, 3600.0))
+        finally:
+            zoom_notulen._rekaman_aktif["durasi_target"] = None
+            zoom_notulen._rekaman_aktif["detik_terekam"] = None
+
     @unittest.skipUnless(_soundfile_asli_tersedia(), "soundfile asli tidak terinstal")
     def test_ukur_rms_mendukung_flac(self):
         """ukur_rms mendukung FLAC (hasil --flac) — tidak mengembalikan None."""

@@ -14,6 +14,12 @@ Cara pakai:
   python zoom_notulen.py --tujuan-email "budi@mail.com, siti@mail.com"  # kirim notulen via email
   python zoom_notulen.py --abaikan-senyap               # lewati peringatan rekaman sunyi
 
+  Perpanjangan durasi di TENGAH perekaman (rapat belum selesai):
+  - Terminal: tekan '+' untuk menambah 15 menit, atau ketik angka (detik)
+    lalu Enter untuk mengatur SISA waktu rekaman dari sekarang.
+  - Streamlit: gunakan panel 'Perpanjang Durasi' saat rekaman berjalan.
+  Rekaman TIDAK diputus: file WAV yang sama terus ditulis sampai durasi baru.
+
   Pengaturan default (judul, peserta, email, durasi, dll.) bisa disimpan di
   file 'konfigurasi.json' (lihat konfigurasi.example.json) agar tidak perlu
   mengetik ulang setiap kali. Argumen CLI tetap menang atas konfigurasi.
@@ -75,6 +81,14 @@ def aktifkan_utf8_stdout():
         except (AttributeError, ValueError):
             pass  # stdin/stdout tidak mendukung reconfigure (mis. di beberapa IDE)
 
+
+# Terapkan di level impor, bukan hanya di main(): streamlit_app.py & perekaman
+# live mengimpor modul & memanggil fungsi langsung (tanpa main()),
+# sehingga tanpa ini logging emoji \u26a0\ufe0f tetap gagal encoding cp1252.
+# Handler logging memegang referensi objek sys.stdout yang sama; reconfigure
+# mengubahnya in-place, jadi aman dipanggil sebelum/meskipun handler sudah ada.
+aktifkan_utf8_stdout()
+
 # ==========================================
 # 1. KONFIGURASI
 # ==========================================
@@ -130,7 +144,14 @@ GEMINI_TEMPERATURE = 0.2  # temperature rendah -> output notulen lebih konsisten
 TOMBOL_HENTI = "q"
 TOMBOL_PAUSE = "p"   # tekan 'p' untuk pause/resume perekaman
 TOMBOL_RESUME = "r"  # alias: 'r' juga bisa untuk resume (selain 'p')
-
+# Perpanjangan durasi di TENGAH perekaman (rapat belum selesai):
+# - tekan '+' -> tambah TAMBAH_DURASI_PRESET detik.
+# - ketik angka (detik) lalu Enter -> sisa rekaman = angka tersebut.
+TOMBOL_TAMBAH_DURASI = "+"
+TAMBAH_DURASI_PRESET = 900  # detik tambahan per tekanan '+' (15 menit)
+# Sisa rekaman mencapai ambang ini (detik) -> peringatan di konsol/terminal dan
+# saran perpanjangan, plus tombol 'perpanjang cepat' di panel Streamlit.
+PERINGATAN_SISA_DETIK = 300  # 5 menit
 KONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "konfigurasi.json")
 PILIHAN_SUMBER = ("mic", "loopback")
 PILIHAN_FORMAT = ("md", "txt", "both")
@@ -242,10 +263,17 @@ def _deteksi_msvcrt():
 
 
 def _pantau_tombol_henti(berhenti, pause_event=None):
-    """Utas latar: menunggu tombol henti ('q') atau pause ('p'/'r') di konsol.
+    """Utas latar: menunggu tombol henti ('q'), pause ('p'/'r'), dan perpanjangan
+    durasi ('+' atau angka + Enter) di konsol.
 
     Hanya aktif di Windows (msvcrt). Di OS lain (tanpa msvcrt) utas berakhir
     seketika - Ctrl+C tetap bisa dipakai sebagai penghenti darurat.
+
+    Perpanjangan durasi:
+    - '+'         -> tambah TAMBAH_DURASI_PRESET detik (default 15 menit)
+    - '0'-'9'     -> mengetik angka (detik), ditampilkan di layar
+    - Enter       -> terapkan: sisa waktu rekaman = angka yang diketik
+    - Backspace   -> hapus satu digit terakhir; Ctrl+C tetap menghentikan.
 
     berhenti: threading.Event - ditandai saat 'q' ditekan
     pause_event: threading.Event - ditandai saat 'p' ditekan (pause), di-clear saat 'r' (resume)
@@ -253,6 +281,7 @@ def _pantau_tombol_henti(berhenti, pause_event=None):
     msvcrt = _deteksi_msvcrt()
     if msvcrt is None:
         return
+    angka_buffer = []  # digit yang sedang diketik untuk pengaturan sisa durasi
     while not berhenti.is_set():
         if msvcrt.kbhit():
             tombol = msvcrt.getch().lower()
@@ -269,12 +298,133 @@ def _pantau_tombol_henti(berhenti, pause_event=None):
                     # Sedang rekam -> pause
                     pause_event.set()
                     print(f"\n-> Tombol '{tombol.decode()}': PAUSE perekaman...", end="", flush=True)
+            elif tombol == TOMBOL_TAMBAH_DURASI.encode():
+                # '+': perpanjang perekaman aktif dengan durasi preset
+                if tambah_durasi_rekaman(TAMBAH_DURASI_PRESET):
+                    status = _durasi_rekaman_aktif()
+                    total_baru = status[1] if status else None
+                    pesan = (
+                        f"\n-> '{tombol.decode()}': durasi ditambah "
+                        f"{TAMBAH_DURASI_PRESET // 60} menit (total {int(total_baru)} detik = "
+                        f"{_format_durasi(total_baru)})..."
+                        if total_baru
+                        else f"\n-> '{tombol.decode()}': durasi ditambah {TAMBAH_DURASI_PRESET // 60} menit..."
+                    )
+                    print(pesan, end="", flush=True)
+                else:
+                    print("\n-> Tidak ada perekaman aktif untuk diperpanjang.", end="", flush=True)
+            elif angka_buffer or (48 <= tombol[0] <= 57):
+                # Ketik angka (detik) lalu Enter -> atur SISA waktu rekaman
+                if tombol == b"\x1b":  # Esc: batalkan input angka
+                    angka_buffer.clear()
+                    print("\n-> Input sisa durasi dibatalkan.", end="", flush=True)
+                elif 48 <= tombol[0] <= 57:  # digit '0'-'9'
+                    if len(angka_buffer) < 7:
+                        angka_buffer.append(chr(tombol[0]))
+                        print(
+                            f"\n-> Sisa rekaman (detik): {''.join(angka_buffer)} — tekan Enter",
+                            end="",
+                            flush=True,
+                        )
+                elif tombol in (b"\r", b"\n"):  # Enter: terapkan
+                    teks = "".join(angka_buffer)
+                    angka_buffer.clear()
+                    if teks.isdigit() and atur_sisa_durasi_rekaman(int(teks)):
+                        print(
+                            f"\n-> Sisa waktu rekaman = {int(teks)} detik ({_format_durasi(int(teks))})...",
+                            end="",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            "\n-> Tidak ada perekaman aktif / angka tidak valid.",
+                            end="",
+                            flush=True,
+                        )
+                elif tombol == b"\x08" and angka_buffer:  # Backspace
+                    angka_buffer.pop()
+                    sisanya = "".join(angka_buffer) or "-"
+                    print(
+                        f"\n-> Sisa rekaman (detik): {sisanya} — tekan Enter",
+                        end="",
+                        flush=True,
+                    )
         time.sleep(0.05)
 
 
-# Registry event perekaman aktif: memungkinkan penghentian rekaman dari luar
+# Registry perekaman aktif: memungkinkan pengendalian rekaman dari luar
 # (mis. tombol 'Hentikan Rekaman' di Web UI Streamlit), setara tombol 'q'.
-_rekaman_aktif = {"berhenti": None}
+# - 'berhenti': threading.Event yang ditandai untuk menghentikan rekaman.
+# - 'durasi_target': TOTAL durasi perekaman (detik) yang dibaca ulang oleh loop
+#   rekam setiap iterasi chunk — inilah yang membuat durasi bisa DIPERPANJANG
+#   di tengah jalan (dari UI Streamlit atau tombol terminal) tanpa memutus
+#   stream audio maupun file WAV yang sedang ditulis.
+# - 'detik_terekam': durasi yang sudah benar-benar terekam (diperbarui loop,
+#   waktu pause tidak dihitung) — dipakai agar perpanjangan dihitung dari
+#   posisi rekaman saat ini.
+# - 'rate': sample rate stream rekam aktif (detik per frame dihitung dari sini).
+#
+# PENTING: salinan modul yang berbeda (mis. hasil reload/re-import oleh Streamlit
+# saat file berubah) harus tetap berbagi DATA perekaman yang sama, karena thread
+# perekaman yang masih hidup terikat ke salinan lama. Untuk itu dict ini disimpan
+# sebagai atribut modul `sys` bertanda: salinan baru akan mengikat ke dict yang
+# sudah ada, bukan membuatnya baru. Nilai direset ke None di akhir perekaman,
+# jadi aman dipakai untuk perekaman berikutnya tanpa kunci tambahan.
+if getattr(sys, "_zoom_notulen_rekaman_aktif", None) is None:
+    sys._zoom_notulen_rekaman_aktif = {
+        "berhenti": None,
+        "durasi_target": None,
+        "detik_terekam": None,
+        "rate": None,
+    }
+_rekaman_aktif = sys._zoom_notulen_rekaman_aktif
+
+
+def _durasi_rekaman_aktif():
+    """Mengembalikan (detik_terekam, durasi_target) dari perekaman aktif,
+    atau None jika tidak ada perekaman yang sedang berjalan."""
+    if _rekaman_aktif["durasi_target"] is None:
+        return None
+    return (
+        _rekaman_aktif["detik_terekam"] or 0.0,
+        float(_rekaman_aktif["durasi_target"]),
+    )
+
+
+def tambah_durasi_rekaman(detik_tambahan=TAMBAH_DURASI_PRESET):
+    """Memperpanjang perekaman yang sedang berjalan dengan detik_tambahan.
+
+    Bisa dipanggil kapan saja saat rekaman berjalan (mis. dari tombol Web UI
+    Streamlit). Loop perekakan membaca durasi target baru pada iterasi chunk
+    berikutnya, jadi perubahan langsung efektif tanpa memutus stream audio.
+
+    Mengembalikan True jika ada perekaman aktif dan durasinya diperpanjang,
+    False jika tidak ada perekaman berjalan atau jumlahnya tidak valid.
+    """
+    if _rekaman_aktif["durasi_target"] is None or detik_tambahan <= 0:
+        return False
+    _rekaman_aktif["durasi_target"] = (
+        int(_rekaman_aktif["durasi_target"]) + int(detik_tambahan)
+    )
+    return True
+
+
+def atur_sisa_durasi_rekaman(detik_sisa):
+    """Mengatur SISA waktu perekaman aktif menjadi detik_sisa (dari sekarang).
+
+    Berbeda dengan tambah_durasi_rekaman yang menambahkan; fungsi ini menyetel
+    durasi target = durasi yang sudah terekam + detik_sisa. Berguna mis. di
+    terminal: ketik angka lalu Enter untuk memberi rekaman 'N detik lagi'.
+
+    Mengembalikan True jika berhasil, False jika tidak ada perekaman berjalan
+    atau nilai tidak valid.
+    """
+    target = _rekaman_aktif["durasi_target"]
+    terekam = _rekaman_aktif["detik_terekam"]
+    if target is None or terekam is None or detik_sisa <= 0:
+        return False
+    _rekaman_aktif["durasi_target"] = int(terekam) + int(detik_sisa)
+    return True
 
 
 def hentikan_rekaman():
@@ -292,14 +442,356 @@ def hentikan_rekaman():
     return False
 
 
-def _rekam_berhenti_dengan_pause():
+# ==========================================
+# 3b. TRANSKRIPSI LIVE (Web UI Streamlit)
+# ==========================================
+# Thread daemon men-transkripsi "ekor" file WAV yang sedang DITULIS thread
+# perekam, setiap LIVE_INTERVAL detik (dengan overlap kecil agar kalimat di
+# batas potong tidak hilang). Hasil dikumpulkan di registry di bawah dan
+# ditampilkan UI Streamlit hampir real-time (teks muncul begitu ada yang
+# bicara). Transkrip live hanya tampilan sementara - setelah rekaman selesai,
+# file penuh tetap ditranskripsi ulang untuk hasil akhir (notulen) yang utuh.
+LIVE_INTERVAL_DEFAULT = 60.0   # jeda antar potongan transkripsi live (detik)
+LIVE_OVERLAP_DETIK = 5.0       # overlap antar potongan (detik)
+LIVE_WINDOW_MIN_DETIK = 20.0   # potongan lebih pendek dari ini belum ditranskripsi
+LIVE_GABUNG_AMBANG = 2.0       # toleransi timestamp antar potongan saat menggabung (detik)
+LIVE_FILE_STALE_DETIK = 180.0  # file tak bertumbuh selama ini -> anggap rekaman berakhir
+LIVE_FILE_TXT = "transkrip_live_sementara.txt"  # file teks live (bisa diunduh saat rapat berjalan)
+
+# Registry transkripsi live, mengikuti pola `_rekaman_aktif`: disimpan sebagai
+# atribut modul `sys` agar salinan modul yang beda (Streamlit reload) tetap
+# berbagi data yang sama dengan thread live yang sedang jalan.
+if getattr(sys, "_zoom_notulen_transkrip_live", None) is None:
+    sys._zoom_notulen_transkrip_live = {}
+_transkrip_live = sys._zoom_notulen_transkrip_live
+_transkrip_live_lock = threading.Lock()
+
+
+def _baca_ekor_wav_bertulis(nama_file, detik_ekor):
+    """Membaca ~detik_ekor terakhir dari WAV yang sedang DITULIS thread lain.
+
+    File WAV hasil perekaman streaming belum punya ukuran 'data' final di
+    headernya, jadi panjang data dihitung dari ukuran file, bukan dari header.
+    Data dikonversi ke float32 mono 16 kHz (resample bila perlu) agar siap
+    ditranskripsi Whisper.
+
+    Mengembalikan (audio, detik_mulai) di mana detik_mulai = posisi awal data
+    yang terbaca pada garis waktu file (detik), atau None jika file belum
+    tersedia / belum berisi data audio.
+    """
+    import numpy as np
+    try:
+        ukuran = os.path.getsize(nama_file)
+    except OSError:
+        return None
+    try:
+        with open(nama_file, "rb") as f:
+            riff = f.read(12)
+            if len(riff) < 12 or riff[:4] != b"RIFF" or riff[8:12] != b"WAVE":
+                return None
+            kanal = rate = None
+            awal_data = None
+            while True:
+                posisi = f.tell()
+                if posisi >= min(ukuran, 65536):
+                    break
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    break
+                kode = hdr[:4]
+                ukuran_chunk = int.from_bytes(hdr[4:8], "little")
+                if kode == b"fmt ":
+                    isi = f.read(min(ukuran_chunk, 16))
+                    if len(isi) >= 8:
+                        kanal = int.from_bytes(isi[2:4], "little")
+                        rate = int.from_bytes(isi[4:8], "little")
+                    f.seek(ukuran_chunk - len(isi), 1)
+                elif kode == b"data":
+                    awal_data = posisi + 8
+                    break
+                else:
+                    f.seek(ukuran_chunk + (ukuran_chunk % 2), 1)
+            if not awal_data or not kanal or not rate or ukuran <= awal_data:
+                return None
+            frame_bytes = 2 * kanal  # paInt16 = 2 byte per sampel per kanal
+            total_frame = (ukuran - awal_data) // frame_bytes
+            if total_frame <= 0:
+                return None
+            frame_mulai = max(0, int(total_frame - detik_ekor * rate))
+            f.seek(awal_data + frame_mulai * frame_bytes)
+            data = f.read()
+    except OSError:
+        return None
+    data_len = (len(data) // frame_bytes) * frame_bytes
+    if data_len < frame_bytes:
+        return None
+    data = data[:data_len]
+    sampel = np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
+    sampel = sampel.reshape(-1, kanal)
+    mono = sampel.mean(axis=1) if kanal > 1 else sampel[:, 0]
+    if rate != 16000:
+        from math import gcd
+        from scipy.signal import resample_poly
+        faktor = gcd(16000, rate)
+        mono = resample_poly(mono, 16000 // faktor, rate // faktor).astype(np.float32)
+    return mono, frame_mulai / float(rate)
+
+
+def _transkrip_live_potongan(audio16k, detik_mulai, engine, bahasa, konteks):
+    """Men-transkripsi satu potongan audio float32 mono 16 kHz.
+
+    Mengembalikan dict {mulai_detik: teks} pada garis waktu rekaman penuh
+    (bukan garis waktu potongan) untuk digabung ke registry live. Potongan
+    yang nyaris sunyi dikembalikan kosong - hemat CPU (lokal) / kuota (gemini).
+    """
+    import numpy as np
+    import soundfile as sf
+    import tempfile
+    if audio16k is None or audio16k.size == 0:
+        return {}
+    rms = float(np.sqrt(np.mean(np.square(audio16k))))
+    if rms < AMBANG_RMS_SENYAP:
+        return {}
+    fd, jalur_potongan = tempfile.mkstemp(suffix=".wav", prefix="live_")
+    os.close(fd)
+    try:
+        sf.write(jalur_potongan, audio16k, 16000, format="WAV", subtype="PCM_16")
+        hasil = {}
+        if engine == "gemini":
+            client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 3600})
+            teks = _transkripsi_gemini_satu(
+                client, jalur_potongan, bahasa, offset=detik_mulai, konteks=konteks
+            )
+            urutan = 0
+            for b in teks.splitlines():
+                b = b.strip()
+                if not b or b.startswith("```"):
+                    continue
+                cocok = POLA_TIMESTAMP_GEMINI.match(b)
+                if cocok:
+                    if cocok.group(3) is not None:
+                        detik = int(cocok.group(1)) * 3600 + int(cocok.group(2)) * 60 + int(cocok.group(3))
+                    else:
+                        detik = int(cocok.group(1)) * 60 + int(cocok.group(2))
+                    kunci = round(float(detik), 1)
+                    isi = b[cocok.end():].strip() or b
+                else:
+                    # baris tanpa timestamp (mode cadangan): urutkan tetap
+                    kunci = round(detik_mulai + urutan * 0.01, 2)
+                    isi = b
+                    urutan += 1
+                if isi:
+                    hasil[kunci] = isi
+        else:
+            model = _dapatkan_whisper_model(WHISPER_MODEL)
+            opsi = {
+                "language": bahasa if bahasa != "auto" else None,
+                "beam_size": WHISPER_BEAM_SIZE,
+                "vad_filter": WHISPER_VAD,
+            }
+            if WHISPER_VAD:
+                opsi["vad_parameters"] = {
+                    "threshold": WHISPER_VAD_THOLD,
+                    "min_speech_duration_ms": 250,
+                    "min_silence_duration_ms": 500,
+                    "speech_pad_ms": 200,
+                }
+            if konteks:
+                opsi["initial_prompt"] = konteks
+                opsi["hotwords"] = konteks
+            segmen, _info = model.transcribe(jalur_potongan, **opsi)
+            for s in segmen:
+                teks_seg = (s.text or "").strip()
+                if teks_seg:
+                    hasil[round(detik_mulai + float(s.start), 1)] = teks_seg
+        return hasil
+    finally:
+        _hapus_file(jalur_potongan)
+
+
+def _gabung_potongan(baru, lama):
+    """Gabungkan dict potongan baru ke registry lama (in-place).
+
+    Timestamp yang berdekatan dianggap segmen yang sama (muncul lagi karena
+    overlap) - versi teks yang lebih panjang menang karena potongan berikutnya
+    'menyempurnakan' ujung kalimat yang tadinya terpotong di batas potongan.
+    """
+    for kunci, teks in baru.items():
+        tetangga = None
+        for k_lama in lama:
+            if abs(k_lama - kunci) <= LIVE_GABUNG_AMBANG:
+                tetangga = k_lama
+                break
+        if tetangga is not None:
+            if len(teks) > len(lama[tetangga]):
+                lama[tetangga] = teks
+        else:
+            lama[kunci] = teks
+
+
+def _transkripsi_live_loop(nama_file, engine, bahasa, konteks, interval):
+    """Loop thread transkripsi live: membaca ekor file, transkripsi, menggabung."""
+    ev_berhenti = _transkrip_live.get("berhenti")
+    if ev_berhenti is None:
+        return
+    cutoff = 0.0
+    ukuran_terakhir = -1
+    mulai_stale = None
+    while not ev_berhenti.is_set():
+        # tidur tercacah agar tombol stop tetap responsif
+        tunggu = float(interval)
+        while tunggu > 0 and not ev_berhenti.is_set():
+            time.sleep(0.5)
+            tunggu -= 0.5
+        if ev_berhenti.is_set():
+            break
+        try:
+            ukuran = os.path.getsize(nama_file)
+        except OSError:
+            continue
+        if ukuran == ukuran_terakhir:
+            # file tidak bertumbuh -> perekaman mungkin sudah berakhir;
+            # tunggu sebentar lagi lalu berhenti sendiri (jaga-jaga).
+            if mulai_stale is None:
+                mulai_stale = time.time()
+            elif time.time() - mulai_stale > LIVE_FILE_STALE_DETIK:
+                break
+            continue
+        ukuran_terakhir = ukuran
+        mulai_stale = None
+        ekor = _baca_ekor_wav_bertulis(nama_file, interval + LIVE_OVERLAP_DETIK + 10.0)
+        if ekor is None:
+            continue
+        audio, detik_mulai = ekor
+        durasi_total = detik_mulai + audio.size / 16000.0
+        if durasi_total - cutoff < LIVE_WINDOW_MIN_DETIK:
+            continue  # data baru belum cukup panjang untuk ditranskripsi
+        mulai_potongan = max(0.0, cutoff - LIVE_OVERLAP_DETIK)
+        potong_di_sampel = int((mulai_potongan - detik_mulai) * 16000)
+        if potong_di_sampel < 0:
+            potong_di_sampel = 0
+        mulai_absolut = detik_mulai + potong_di_sampel / 16000.0
+        try:
+            baru = _transkrip_live_potongan(
+                audio[potong_di_sampel:], mulai_absolut, engine, bahasa, konteks
+            )
+        except (Exception, SystemExit) as e:
+            with _transkrip_live_lock:
+                _transkrip_live["error"] = str(e)
+            continue
+        with _transkrip_live_lock:
+            _gabung_potongan(baru, _transkrip_live["potongan"])
+            _transkrip_live["cutoff"] = durasi_total
+            potongan_snapshot = dict(_transkrip_live["potongan"])
+        # Tulis ulang file teks sementara agar bisa diunduh saat rapat berjalan
+        _simpan_transkrip_live_txt(potongan_snapshot)
+        cutoff = durasi_total
+
+
+def mulai_transkripsi_live(nama_file, engine="lokal", bahasa="id", konteks=None,
+                           interval=LIVE_INTERVAL_DEFAULT):
+    """Memulai transkripsi live untuk perekaman yang sedang berjalan di Web UI.
+
+    Thread daemon mem-baca ekor file nama_file setiap `interval` detik,
+    men-transkripsinya (engine 'lokal'/'gemini'), dan mengumpulkan hasilnya
+    agar panel 'Transkrip Live' di Streamlit bisa menampilkannya hampir
+    real-time. Mengembalikan True jika thread dimulai, False jika sudah aktif.
+    """
+    with _transkrip_live_lock:
+        if _transkrip_live.get("aktif"):
+            return False
+        _transkrip_live.clear()
+        # File teks sementara diletakkan di samping file audio (folder yang
+        # sama); nama konstan agar mudah ditemukan/diunduh saat rapat berjalan.
+        _transkrip_live.update({
+            "aktif": True,
+            "berhenti": threading.Event(),
+            "potongan": {},
+            "error": None,
+            "cutoff": 0.0,
+            "engine": engine,
+            "bahasa": bahasa,
+            "path": nama_file,
+            "file_txt": os.path.join(
+                os.path.dirname(os.path.abspath(nama_file)) or ".", LIVE_FILE_TXT
+            ),
+        })
+    # Kosongkan file sisa sesi sebelumnya di awal perekaman baru.
+    try:
+        with open(_transkrip_live["file_txt"], "w", encoding="utf-8") as f:
+            f.write("")
+    except Exception:
+        pass
+    thread = threading.Thread(
+        target=_transkripsi_live_loop,
+        args=(nama_file, engine, bahasa, konteks, float(interval)),
+        daemon=True,
+    )
+    thread.start()
+    return True
+
+
+def berhenti_transkripsi_live():
+    """Menghentikan thread transkripsi live (dipanggil saat rekaman selesai).
+
+    Mengembalikan True jika thread semula aktif, False jika memang tidak.
+    """
+    with _transkrip_live_lock:
+        ev = _transkrip_live.get("berhenti")
+        aktif = bool(_transkrip_live.get("aktif"))
+        _transkrip_live["aktif"] = False
+    if ev is not None:
+        ev.set()
+    return aktif
+
+
+def status_transkrip_live():
+    """Status transkripsi live: {"aktif", "teks", "error", "file_txt"}.
+
+    teks berupa string ber-baris [MM:SS]/[HH:MM:SS] yang sudah terurut waktu,
+    siap ditampilkan UI. file_txt = path file teks sementara (atau None).
+    """
+    with _transkrip_live_lock:
+        potongan = dict(_transkrip_live.get("potongan") or {})
+        aktif = bool(_transkrip_live.get("aktif"))
+        error = _transkrip_live.get("error")
+        file_txt = _transkrip_live.get("file_txt")
+    baris = [f"[{_format_durasi(int(k))}] {t}" for k, t in sorted(potongan.items())]
+    return {"aktif": aktif, "teks": "\n".join(baris), "error": error, "file_txt": file_txt}
+
+
+def _simpan_transkrip_live_txt(potongan):
+    """Menulis transkripsi live ke file teks UTF-8 (perbarui setiap potongan).
+
+    Dipanggil thread live setiap kali ada hasil baru, sehingga file selalu
+    bisa diunduh/dibaca saat rapat masih berjalan. Gagal menulis tidak fatal
+    (mis. file dibuka Excel) - hanya dicatat ke log.
+    """
+    try:
+        jalur = _transkrip_live.get("file_txt")
+        if not jalur:
+            return
+        baris = [f"[{_format_durasi(int(k))}] {t}" for k, t in sorted(potongan.items())]
+        with open(jalur, "w", encoding="utf-8") as f:
+            f.write("\n".join(baris))
+    except Exception as e:
+        logger.info(f"-> Gagal menulis file transkrip live sementara: {e}")
+
+
+def _rekam_berhenti_dengan_pause(durasi_detik=None, sample_rate=None):
     """Memulai utas pemantau tombol henti DAN pause/resume.
+
+    Sekaligus mendaftarkan durasi target perekakan ke registry `_rekaman_aktif`
+    agar durasi bisa diperpanjang dari luar saat rekaman berjalan.
 
     Mengembalikan tuple (berhenti_event, pause_event).
     """
     berhenti = threading.Event()
     pause = threading.Event()
     _rekaman_aktif["berhenti"] = berhenti  # daftarkan agar bisa dihenti dari UI
+    _rekaman_aktif["durasi_target"] = durasi_detik
+    _rekaman_aktif["detik_terekam"] = 0.0
+    _rekaman_aktif["rate"] = sample_rate
     utas = threading.Thread(target=_pantau_tombol_henti, args=(berhenti, pause), daemon=True)
     utas.start()
     return berhenti, pause
@@ -335,21 +827,27 @@ def rekam_audio(durasi_detik, nama_file):
     Audio ditulis bertahap ke disk (streaming per chunk) — aman untuk rapat
     panjang karena tidak memuat seluruh rekaman ke RAM. Tekan 'q' (atau Ctrl+C)
     untuk menghentikan lebih awal: file TETAP disimpan dan lanjut diproses.
+    Durasi juga bisa DIPERPANJANG saat berjalan: tekan '+' di terminal, atau
+    panggil tambah_durasi_rekaman() dari UI Streamlit.
     Mengembalikan durasi yang benar-benar terekam (detik).
     """
     logger.info(f"\n[1/3] Merekam audio rapat selama {durasi_detik} detik (16 kHz mono)...")
-    logger.info(f"      Tekan '{TOMBOL_HENTI}' = stop | '{TOMBOL_PAUSE}' = pause/resume")
+    logger.info(
+        f"      Tekan '{TOMBOL_HENTI}' = stop | '{TOMBOL_PAUSE}' = pause/resume | "
+        f"'{TOMBOL_TAMBAH_DURASI}' = tambah {TAMBAH_DURASI_PRESET // 60} mnt | angka + Enter = sisa rekaman"
+    )
     try:
         channels = KANAL_REKAM
         sampwidth = 2  # paInt16
         chunk = 1024
         total_frames = int(durasi_detik * SAMPLE_RATE)
         frame_bytes = sampwidth * channels
+        target_terakhir = durasi_detik  # durasi target yang sedang dipakai loop
         progress_interval = int(PROGRESS_INTERVAL * SAMPLE_RATE)  # cetak progress tiap N detik
         terakhir_progress = 0
         waktu_pause_mulai = 0  # kapan pause dimulai
 
-        berhenti, pause_event = _rekam_berhenti_dengan_pause()
+        berhenti, pause_event = _rekam_berhenti_dengan_pause(durasi_detik, SAMPLE_RATE)
         try:
             with sd.RawInputStream(
                 samplerate=SAMPLE_RATE,
@@ -362,9 +860,40 @@ def rekam_audio(durasi_detik, nama_file):
                     wf.setsampwidth(sampwidth)
                     wf.setframerate(SAMPLE_RATE)
                     total_read = 0
-                    while total_read < total_frames:
+                    peringatan_sisa = False  # peringatan 'sisa 5 menit' hanya sekali per target
+                    while True:
                         if _berhenti_ditekan(berhenti):
                             break
+                        # Perpanjangan durasi di tengah jalan: baca ulang target
+                        # dari registry setiap iterasi (diubah dari UI/terminal).
+                        target = _rekaman_aktif["durasi_target"]
+                        if target is None:  # jaga-jaga: registry dilepas sebelum loop berakhir
+                            target = target_terakhir
+                        if target != target_terakhir:
+                            total_frames = int(float(target) * SAMPLE_RATE)
+                            target_terakhir = target
+                            if (total_frames - total_read) > int(PERINGATAN_SISA_DETIK * SAMPLE_RATE):
+                                peringatan_sisa = False  # sisa kembali di atas ambang -> peringatan bisa muncul lagi
+                            logger.info(
+                                f"\n-> Durasi perekaman diubah menjadi {int(target)} detik"
+                                f" ({_format_durasi(target)})..."
+                            )
+                        if total_read >= total_frames:
+                            break
+                        # Peringatan 'sisa 5 menit': rekaman hendak berhenti
+                        sisa_frames = total_frames - total_read
+                        if (
+                            not peringatan_sisa
+                            and 0 < sisa_frames <= int(PERINGATAN_SISA_DETIK * SAMPLE_RATE)
+                        ):
+                            peringatan_sisa = True
+                            print()  # newline dari progress bar
+                            logger.info(
+                                f"\n\u26a0\ufe0f Peringatan: sisa waktu rekaman kurang dari "
+                                f"{PERINGATAN_SISA_DETIK // 60} menit — tekan '{TOMBOL_TAMBAH_DURASI}' "
+                                f"untuk tambah {TAMBAH_DURASI_PRESET // 60} mnt, "
+                                "atau ketik angka (detik) + Enter."
+                            )
 
                         # Handle pause/resume
                         if pause_event.is_set():
@@ -390,6 +919,7 @@ def rekam_audio(durasi_detik, nama_file):
                         sisa = min(frames_diperoleh, total_frames - total_read)
                         wf.writeframes(data[: sisa * frame_bytes])
                         total_read += frames_diperoleh
+                        _rekaman_aktif["detik_terekam"] = total_read / SAMPLE_RATE
                         # Progress bar: cetak setiap PROGRESS_INTERVAL detik
                         if total_read - terakhir_progress >= progress_interval:
                             _cetak_progress(total_read, total_frames, SAMPLE_RATE)
@@ -405,10 +935,12 @@ def rekam_audio(durasi_detik, nama_file):
             if berhenti is not None:
                 berhenti.set()
             _rekaman_aktif["berhenti"] = None  # perekaman selesai, lepas registry
+            _rekaman_aktif["durasi_target"] = None
+            _rekaman_aktif["detik_terekam"] = None
     except Exception as e:
         raise SystemExit(f"\nERROR saat merekam audio: {e}") from e
     durasi_aktual = total_read / SAMPLE_RATE
-    if durasi_aktual < durasi_detik - 0.5:
+    if durasi_aktual < target_terakhir - 0.5:
         print(
             f"-> Perekaman dihentikan lebih awal setelah {durasi_aktual:.1f} detik. "
             "Audio tetap disimpan & akan diproses."
@@ -451,7 +983,10 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
     pyaudio = _impor_pyaudiowpatch()
 
     logger.info(f"\n[1/3] Merekam audio sistem (WASAPI loopback) selama {durasi_detik} detik...")
-    logger.info(f"      Tekan '{TOMBOL_HENTI}' (atau Ctrl+C) untuk menghentikan lebih awal.")
+    logger.info(
+        f"      Tekan '{TOMBOL_HENTI}' (atau Ctrl+C) = stop | "
+        f"'{TOMBOL_TAMBAH_DURASI}' = tambah {TAMBAH_DURASI_PRESET // 60} mnt | angka + Enter = sisa rekaman"
+    )
     with pyaudio.PyAudio() as p:
         wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
 
@@ -511,20 +1046,52 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
 
         total_frames = int(durasi_detik * sample_rate_rekam)
         frame_bytes = 2 * channels_rekam  # paInt16 = 2 byte per frame per kanal
+        target_terakhir = durasi_detik  # durasi target yang sedang dipakai loop
         total_read = 0
         progress_interval = int(PROGRESS_INTERVAL * sample_rate_rekam)
         terakhir_progress = 0
         waktu_pause_mulai = 0
-        berhenti, pause_event = _rekam_berhenti_dengan_pause()
+        peringatan_sisa = False  # peringatan 'sisa 5 menit' hanya sekali per target
+        berhenti, pause_event = _rekam_berhenti_dengan_pause(durasi_detik, sample_rate_rekam)
         try:
             try:
                 with wave.open(nama_file, "wb") as wf:
                     wf.setnchannels(channels_rekam)
                     wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
                     wf.setframerate(sample_rate_rekam)
-                    while total_read < total_frames:
+                    while True:
                         if _berhenti_ditekan(berhenti):
                             break
+                        # Perpanjangan durasi di tengah jalan: baca ulang target
+                        # dari registry setiap iterasi (diubah dari UI/terminal).
+                        target = _rekaman_aktif["durasi_target"]
+                        if target is None:  # jaga-jaga: registry dilepas sebelum loop berakhir
+                            target = target_terakhir
+                        if target != target_terakhir:
+                            total_frames = int(float(target) * sample_rate_rekam)
+                            target_terakhir = target
+                            if (total_frames - total_read) > int(PERINGATAN_SISA_DETIK * sample_rate_rekam):
+                                peringatan_sisa = False  # sisa kembali di atas ambang
+                            logger.info(
+                                f"\n-> Durasi perekaman diubah menjadi {int(target)} detik"
+                                f" ({_format_durasi(target)})..."
+                            )
+                        if total_read >= total_frames:
+                            break
+                        # Peringatan 'sisa 5 menit': rekaman hendak berhenti
+                        sisa_frames = total_frames - total_read
+                        if (
+                            not peringatan_sisa
+                            and 0 < sisa_frames <= int(PERINGATAN_SISA_DETIK * sample_rate_rekam)
+                        ):
+                            peringatan_sisa = True
+                            print()  # newline dari progress bar
+                            logger.info(
+                                f"\n\u26a0\ufe0f Peringatan: sisa waktu rekaman kurang dari "
+                                f"{PERINGATAN_SISA_DETIK // 60} menit — tekan '{TOMBOL_TAMBAH_DURASI}' "
+                                f"untuk tambah {TAMBAH_DURASI_PRESET // 60} mnt, "
+                                "atau ketik angka (detik) + Enter."
+                            )
 
                         # Handle pause/resume
                         if pause_event.is_set():
@@ -550,6 +1117,7 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
                         sisa = min(frames_diperoleh, total_frames - total_read)
                         wf.writeframes(data[: sisa * frame_bytes])
                         total_read += frames_diperoleh
+                        _rekaman_aktif["detik_terekam"] = total_read / sample_rate_rekam
                         # Progress bar: cetak setiap PROGRESS_INTERVAL detik
                         if total_read - terakhir_progress >= progress_interval:
                             _cetak_progress(total_read, total_frames, sample_rate_rekam)
@@ -566,10 +1134,12 @@ def rekam_audio_loopback(durasi_detik, nama_file, index_perangkat=None):
             if berhenti is not None:
                 berhenti.set()
             _rekaman_aktif["berhenti"] = None  # perekaman selesai, lepas registry
+            _rekaman_aktif["durasi_target"] = None
+            _rekaman_aktif["detik_terekam"] = None
             stream.stop_stream()
             stream.close()
     durasi_aktual = total_read / sample_rate_rekam
-    if durasi_aktual < durasi_detik - 0.5:
+    if durasi_aktual < target_terakhir - 0.5:
         print(
             f"-> Perekaman dihentikan lebih awal setelah {durasi_aktual:.1f} detik. "
             "Audio tetap disimpan & akan diproses."

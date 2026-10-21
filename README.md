@@ -27,6 +27,7 @@ Rekam audio  →  Transkripsi (faster-whisper lokal / Gemini cloud)  →  Notule
 - 🎙️ **Dua sumber perekaman**: mikrofon (`mic`) atau **audio sistem langsung dari Windows** via WASAPI loopback (`loopback`) — menangkap suara *semua* peserta rapat Zoom tanpa fitur rekam bawaan.
 - ⏹️ **Hentikan rekaman kapan saja**: tekan **`q`** (atau **Ctrl+C**) saat merekam — rekaman berhenti, audio yang sudah terekam **tetap disimpan** lalu langsung diproses ke transkripsi & notulen. Jika dihentikan sangat cepat (< 2 detik), muncul peringatan "rekaman sangat pendek".
 - ⏸️ **Pause/Resume rekaman**: tekan **`p`** untuk pause, tekan **`p`** atau **`r`** lagi untuk resume. Waktu pause tidak dihitung dalam durasi rekaman.
+- ⏫ **Perpanjang durasi di tengah perekaman**: rapat masih berjalan padahal durasi hampir habis? Tambah/ubah durasi **tanpa memutus audio** — di terminal tekan **`+`** (tambah 15 menit) atau ketik angka detik lalu **`Enter`** (setel sisa waktu); di Web UI Streamlit gunakan panel **⏩ Perpanjang Durasi** (tombol preset atau input bebas). Peringatan ⏰ muncul otomatis saat sisa rekaman ≤ **5 menit**, plus tombol perpanjang cepat di UI. File WAV yang sama terus ditulis — tidak ada audio yang hilang.
 - 📄 **Transkripsi bahasa Indonesia** (atau bahasa lain) dengan dua mesin: **faster-whisper lokal** (CTranslate2 + INT8 + VAD, **±4× lebih cepat** dari OpenAI Whisper di CPU) atau **transkripsi cloud Gemini** (`--engine gemini` — super cepat, verbatim, ber-timestamp **+ speaker diarization**).
 - 📂 **Transkrip mentah otomatis disimpan** ke `Transkrip_<timestamp>.txt` untuk dokumentasi & audit.
 - 🔊 **Deteksi rekaman sunyi otomatis** — RMS audio diukur sebelum transkripsi; jika hampir diam, peringatan jelas (dengan angka & penyebab) ditampilkan lebih dulu.
@@ -199,9 +200,28 @@ streamlit run streamlit_app.py
 **Fitur Web UI:**
 - 📁 Upload audio/video langsung di browser
 - 🎙️ Rekam audio dari mikrofon
+- ⏩ **Perpanjang durasi selama merekam** (lihat di bawah)
 - 📊 Lihat transkrip dan notulen side-by-side
 - 💾 Download hasil dalam berbagai format
 - ⚙️ Pengaturan engine, bahasa, subtitle, translate, PDF
+
+#### ⏩ Perpanjang durasi saat perekaman berjalan
+
+Rapat belum selesai tapi durasi awal sudah hampir habis? Durasi bisa
+**ditambah/diubah di tengah jalan** tanpa menghentikan perekaman, mode `mic`
+maupun `loopback`:
+
+| Antarmuka | Cara |
+|---|---|
+| **Terminal** | Tekan **`+`** → tambah 15 menit per tekanan. Atau ketik angka (detik, maks 7 digit) lalu **`Enter`** → sisa waktu rekaman disetel ke angka itu. `Backspace` = hapus digit, `Esc` = batalkan input |
+| **Streamlit** | Saat merekam, muncul panel **⏩ Perpanjang Durasi Perekaman**: status terekam & target, tombol preset **+5 / +10 / +15 / +30 mnt**, dan input bebas 1–240 menit + tombol **➕ Tambahkan Durasi** |
+
+Detail perilaku:
+- Rekaman **tidak diputus** — file WAV yang sama terus ditulis sampai durasi baru; stream audio tetap berjalan.
+- Progress bar mengikuti durasi baru: 60 menit yang diperpanjang jadi 75 menit tampil sebagai `00:55:00 / 01:15:00`.
+- **Peringatan ⏰ otomatis** saat sisa waktu ≤ **5 menit**: di terminal + tombol **➕ Tambah 15 menit sekarang** di panel Streamlit.
+- Waktu `pause` tidak dihitung, jadi "sisa 5 menit" berarti 5 menit audio, bukan 5 menit waktu dinding.
+- Dari kode Python juga bisa: `zoom_notulen.tambah_durasi_rekaman(600)` (tambah 10 mnt) atau `zoom_notulen.atur_sisa_durasi_rekaman(300)` (setel sisa 5 mnt) — keduanya `False` jika tidak ada perekaman berjalan.
 
 #### 🎚️ Pilih engine transkripsi (lokal / gemini)
 
@@ -320,7 +340,7 @@ python zoom_notulen.py --durasi 3600 --tujuan-email "budi@mail.com, siti@mail.co
 
 | Opsi | Default | Fungsi |
 |---|---|---|
-| `--durasi <detik>` | `60` | Durasi perekaman dalam detik — **tanpa batas maksimum** (mis. `7200` = 2 jam, `10800` = 3 jam). Jika > 1 jam, skrip menampilkan info otomatis (ukuran file & RAM transkripsi) sebelum merekam. **Selama merekam, tekan `q` (atau Ctrl+C) untuk berhenti lebih awal** — audio tersimpan & tetap diproses |
+| `--durasi <detik>` | `60` | Durasi perekaman dalam detik — **tanpa batas maksimum** (mis. `7200` = 2 jam, `10800` = 3 jam). Jika > 1 jam, skrip menampilkan info otomatis (ukuran file & RAM transkripsi) sebelum merekam. **Selama merekam**: `q`/Ctrl+C = berhenti lebih awal (audio tetap diproses), `+` = tambah 15 menit, angka + `Enter` = setel sisa waktu rekaman. Peringatan ⏰ muncul saat sisa ≤ 5 menit |
 | `--audio <path>` | — | Transkripsi file audio yang sudah ada (lewati perekaman) |
 | `--youtube <url>` | — | URL YouTube untuk diunduh dan diproses langsung (butuh `yt-dlp`, lihat instalasi) |
 | `--folder <path>` | — | Folder berisi file audio/video untuk diproses secara batch (semua file didukung) |
