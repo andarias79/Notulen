@@ -27,3 +27,11 @@ _klip_henti.wav
 notulen.log
 test.wav
 test_result*.txt
+
+# Log uji E2E & skrip uji manual
+streamlit_e2e*.log
+streamlit_test.log
+tts_uji*.log
+uji_e2e_*.log
+tts_uji.py
+uji_e2e_live.py
