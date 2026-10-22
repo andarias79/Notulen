@@ -9,6 +9,36 @@ menggunakan **Streamlit Community Cloud**.
 - Akun GitHub; akun Streamlit dibuat lewat sign-in GitHub.
 - API key Gemini (dapat di [aistudio.google.com/apikey](https://aistudio.google.com/apikey)).
 
+## ✅ Cek sebelum push: pastikan `.venv` tidak ikut ter-commit
+
+Environment lokal (`.venv` hasil `setup.bat`) **tidak boleh di-push** ke GitHub:
+ukurannya besar, berisi binary khusus Windows, dan Streamlit Cloud membangun
+sendiri dari `requirements.txt` + `packages.txt` — bukan dari venv lokal Anda.
+`.gitignore` sudah memblokirnya, tapi uji ulang sekali ini sebelum deploy:
+
+```bash
+# 1. Tidak boleh muncul .venv/ (atau venv/) di daftar perubahan
+git status --short
+
+# 2. Harus mengembalikan aturan ignore (artinya aman)
+git check-ignore -v .venv
+
+# 3. Tidak boleh ada file venv yang sudah terlacak git
+git ls-files | grep -iE "\.?venv/"
+```
+
+Kalau di poin 3 muncul file (biasanya karena venv dibuat sebelum `.gitignore`
+diperbarui), singkirkan dari pelacakan tanpa menghapus file lokal:
+
+```bash
+git rm -r --cached .venv
+
+git commit -m "chore: singkirkan venv dari pelacakan git"
+```
+
+Lalu samakan isi `requirements.txt` dengan dependensi yang dipakai
+(`setup.bat` menginstal persis file ini), sehingga versi di cloud = versi lokal.
+
 ## Langkah deploy
 
 1. Buka <https://share.streamlit.io> lalu **sign in dengan akun GitHub**.

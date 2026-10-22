@@ -101,7 +101,20 @@ ffmpeg -version
 
 ### 3. Install dependensi Python
 
+**Windows (direkomendasikan):** jalankan sekali:
+
 ```bash
+setup.bat
+```
+
+Skrip ini otomatis membuat virtual environment `.venv`, menginstal seluruh dependensi di dalamnya, lalu memverifikasi paket kunci. `run.bat`, `run-test.bat`, dan `run-index.bat` otomatis memakai `.venv` tersebut.
+
+**Cara manual (semua OS):**
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate.bat     # Windows
+# atau: source .venv/bin/activate   # Linux/macOS
 pip install -r requirements.txt
 ```
 
