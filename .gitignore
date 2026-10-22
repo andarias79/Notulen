@@ -16,6 +16,10 @@ konfigurasi.json
 __pycache__/
 *.pyc
 
+# Virtual environment
+.venv/
+venv/
+
 Hasil_Rekaman/
 Hasil_Transkripsi/
 Hasil_Notulen/
