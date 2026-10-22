@@ -7,6 +7,7 @@ numpy==2.4.0
 PyAudioWPatch==0.2.12.8; sys_platform == "win32"
 python-dotenv==1.2.2
 python-multipart>=0.0.9
+pytest>=8.0
 resend==2.35.0
 scipy>=1.11.0
 sounddevice==0.5.5

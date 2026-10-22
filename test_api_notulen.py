@@ -168,3 +168,101 @@ class TestProses:
             )
         assert res.status_code == 200
         assert res.json()["notulen_md"] == "## Notulen single"
+
+
+# ── deteksi venv (_cmd_venv / _rerun_di_venv) ────────────────────────
+import sys
+import subprocess
+
+from pathlib import Path
+
+import api_notulen as api
+
+
+SKRIPT = Path(api.__file__).resolve()
+
+
+def _buat_venv_palsu(dasar, nama_exe="python.exe"):
+    """Buat folder .venv/Scripts/python.exe kosong agar terdeteksi ada."""
+    exe = dasar / ".venv" / "Scripts" / nama_exe
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("")
+    return exe
+
+
+class TestCmdVenv:
+    def test_sudah_reexec_tidak_berulang(self):
+        with mock.patch.dict(os.environ, {api._VENV_REEXEC: "1"}):
+            assert api._cmd_venv() is None
+
+    def test_skip_oleh_env_tanpa_venv(self):
+        with mock.patch.dict(os.environ, {"NOTULEN_TANPA_VENV": "1"}):
+            assert api._cmd_venv() is None
+
+    def test_venv_belum_dibuat_none(self, tmp_path):
+        argv = [str(SKRIPT), "--port", "9000"]
+        with mock.patch.dict(os.environ, {}), mock.patch.object(sys, "argv", argv):
+            assert api._cmd_venv(dasar=tmp_path) is None
+
+    def test_sudah_dalam_venv_none(self, tmp_path):
+        exe = _buat_venv_palsu(tmp_path)
+        argv = ["uvicorn.exe", "api_notulen:app", "--port", "8000"]
+        with mock.patch.dict(os.environ, {}), mock.patch.object(sys, "argv", argv), mock.patch.object(
+            sys, "executable", str(exe)
+        ):
+            assert api._cmd_venv(dasar=tmp_path) is None
+
+    def test_diimpor_sebagai_modul_none(self, tmp_path):
+        # Argv test runner / aplikasi lain → tidak boleh re-exec
+        exe = _buat_venv_palsu(tmp_path)
+        argv = ["test-runner", "test_api_notulen"]
+        with mock.patch.dict(os.environ, {}), mock.patch.object(sys, "argv", argv), mock.patch.object(
+            sys, "executable", str(exe.parent / "bin" / "python")  # executable berbeda dari venv
+        ):
+            assert api._cmd_venv(dasar=tmp_path) is None
+
+    def test_script_langsung_instruksikan_reexec(self, tmp_path):
+        exe = _buat_venv_palsu(tmp_path)
+        argv = [str(SKRIPT), "--port", "9000"]
+        with mock.patch.dict(os.environ, {}), mock.patch.object(sys, "argv", argv), mock.patch.object(
+            sys, "executable", "C:/Python313/python.exe"
+        ):
+            cmd = api._cmd_venv(dasar=tmp_path)
+        assert cmd == [str(exe), str(SKRIPT), "--port", "9000"]
+
+    def test_uvicorn_cli_instruksikan_reexec(self, tmp_path):
+        exe = _buat_venv_palsu(tmp_path)
+        argv = ["uvicorn.exe", "api_notulen:app", "--host", "0.0.0.0", "--port", "8000"]
+        with mock.patch.dict(os.environ, {}), mock.patch.object(sys, "argv", argv), mock.patch.object(
+            sys, "executable", "C:/Python313/python.exe"
+        ):
+            cmd = api._cmd_venv(dasar=tmp_path)
+        assert cmd == [str(exe), "-m", "uvicorn", "api_notulen:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+class TestRerunDiVenv:
+    def test_reexec_aman_akan_subprocess_lalu_exit(self):
+        hasil = mock.Mock(returncode=7)
+        with mock.patch.object(api, "_cmd_venv", return_value=["venv-python", "api_notulen.py"]), mock.patch.object(
+            subprocess, "run", return_value=hasil
+        ) as dgn_run, mock.patch.dict(os.environ, {}):
+            try:
+                api._rerun_di_venv()
+                assert False, "harusnya SystemExit"
+            except SystemExit as e:
+                assert e.code == 7
+        dgn_run.assert_called_once()
+        cmd_dikirim = dgn_run.call_args.args[0]
+        env_dikirim = dgn_run.call_args.kwargs["env"]
+        assert cmd_dikirim == ["venv-python", "api_notulen.py"]
+        assert env_dikirim[api._VENV_REEXEC] == "1"
+
+    def test_reexec_gagal_oserror_tetap_lanjut(self):
+        with mock.patch.object(api, "_cmd_venv", return_value=["venv-python"]), mock.patch.object(
+            subprocess, "run", side_effect=OSError("tidak ada python venv")
+        ):
+            api._rerun_di_venv()  # tidak boleh SystemExit — server tetap dicoba
+
+    def test_reexec_tanpa_cmd_apa_adanya(self):
+        with mock.patch.object(api, "_cmd_venv", return_value=None):
+            api._rerun_di_venv()  # tidak boleh SystemExit

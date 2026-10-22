@@ -5,6 +5,11 @@ Menjalankan server:
     python api_notulen.py --port 9000
     uvicorn api_notulen:app --host 0.0.0.0 --port 8000
 
+Deteksi .venv otomatis: jika dijalankan dengan Python yang BUKAN .venv
+(mis. Python global hasil instalasi baru) dan .venv tersedia, proses otomatis
+dipindahkan ke Python .venv — dependensi tidak perlu diinstal dua kali.
+Lewati dengan variabel lingkungan NOTULEN_TANPA_VENV=1.
+
 Dokumentasi interaktif otomatis (Swagger): http://127.0.0.1:8000/docs
 Dokumentasi alternatif (ReDoc):          http://127.0.0.1:8000/redoc
 
@@ -32,8 +37,76 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+
+# ------------------------------------------------------------------
+# Deteksi venv: pindahkan proses ke Python .venv bila dijalankan di
+# luar venv. Harus berjalan SEBELUM import uvicorn/fastapi, supaya
+# Python global tanpa dependensi tetap bisa menyalakan server dari
+# .venv hasil setup.bat.
+# ------------------------------------------------------------------
+_VENV_REEXEC = "NOTULEN_VENV_REEXEC"  # penanda agar re-exec tidak berulang
+
+
+def _cmd_venv(dasar=None):
+    """Kembalikan perintah re-exec ke Python .venv, atau None jika tidak perlu.
+
+    Memberlakukan diri hanya pada dua cara menyalakan server:
+      1. Script langsung : python api_notulen.py --port 9000
+      2. Via CLI uvicorn : uvicorn api_notulen:app --port 8000
+    Saat diimpor sebagai modul (tests, aplikasi lain) None dikembalikan —
+    pemanggil yang menentukan environment-nya.
+    """
+    if os.environ.get(_VENV_REEXEC):  # sudah re-exec — jangan berulang
+        return None
+    if os.environ.get("NOTULEN_TANPA_VENV"):  # pintu darurat untuk skip venv
+        return None
+    dasar = Path(dasar or Path(__file__).resolve().parent).resolve()
+    folder_venv = dasar / ".venv"
+    if os.name == "nt":
+        venv_python = folder_venv / "Scripts" / "python.exe"
+    else:
+        venv_python = folder_venv / "bin" / "python"
+    if not venv_python.is_file():  # .venv belum dibuat (setup.bat belum dijalankan)
+        return None
+    try:
+        if Path(sys.executable).resolve() == venv_python.resolve():
+            return None  # sudah berjalan di dalam .venv
+    except OSError:
+        pass
+
+    argv = sys.argv
+    script = Path(__file__).resolve()
+    if argv and Path(argv[0]).resolve() == script:
+        # python api_notulen.py ... → jalankan ulang script di venv
+        return [str(venv_python), str(script)] + list(argv[1:])
+    if len(argv) > 1 and argv[1] == "api_notulen:app":
+        # uvicorn/pip run api_notulen:app ... → modul uvicorn di venv
+        return [str(venv_python), "-m", "uvicorn"] + list(argv[1:])
+    return None
+
+
+def _rerun_di_venv():
+    """Eksekusi perintah dari _cmd_venv() bila ada, lalu hentikan proses lama."""
+    cmd = _cmd_venv()
+    if not cmd:
+        return
+    env = os.environ.copy()
+    env[_VENV_REEXEC] = "1"
+    print(f"[INFO] Menyalakan API server dengan Python dari .venv ({cmd[0]}) ...")
+    try:
+        hasil = subprocess.run(cmd, env=env)
+    except OSError as e:
+        print(f"[INFO] Gagal memindahkan proses ke .venv ({e}) — lanjut dengan Python ini.")
+        return
+    raise SystemExit(hasil.returncode)
+
+
+_rerun_di_venv()
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
